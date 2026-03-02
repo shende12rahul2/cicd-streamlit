@@ -57,7 +57,8 @@ def get_summary_statistics(df: pd.DataFrame) -> pd.DataFrame:
     numeric_df = df.select_dtypes(include=[np.number])
     if numeric_df.empty:
         return pd.DataFrame({"info": ["No numeric columns found"]})
-    return numeric_df.describe().round(2)
+    stats: pd.DataFrame = numeric_df.describe().round(2)
+    return stats
 
 
 def get_column_info(df: pd.DataFrame) -> pd.DataFrame:
@@ -107,7 +108,7 @@ def filter_dataframe(
 
     col_data = df[column].astype(str)
     mask = col_data.str.contains(search_term, case=False, na=False)
-    result: pd.DataFrame = df[mask]
+    result: pd.DataFrame = df.loc[mask]
     logger.info(
         "Filter on '%s' for '%s': %d/%d rows matched",
         column,
@@ -146,4 +147,5 @@ def get_top_n_rows(df: pd.DataFrame, n: int = 10) -> pd.DataFrame:
     """
     if n <= 0:
         raise ValueError("Number of rows must be a positive integer.")
-    return df.head(n)
+    result: pd.DataFrame = df.head(n)
+    return result
