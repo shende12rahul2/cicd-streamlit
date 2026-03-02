@@ -1,0 +1,54 @@
+# ── Python ───────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+eggs/
+*.whl
+
+# ── Virtual environments ────────────────────────────────────────────
+.venv/
+venv/
+ENV/
+env/
+
+# ── IDE / Editor ────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# ── Testing / Coverage ──────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+
+# ── Environment & Secrets ───────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ── OS files ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Streamlit ───────────────────────────────────────────────────────
+.streamlit/secrets.toml
+
+# ── Misc ────────────────────────────────────────────────────────────
+*.log
+*.bak
+*.tmp

@@ -1,0 +1,67 @@
+# ──────────────────────────────────────────────────────────────────────
+# OpenSSF Scorecard — Supply Chain Security Assessment
+#
+# Evaluates the project against the OpenSSF Scorecard criteria:
+#   • Branch protection, signed releases, pinned dependencies
+#   • CI/CD security, vulnerability management
+#   • Token permissions, dependency updates
+#
+# Results appear in GitHub Security tab → Code Scanning.
+# Runs weekly + on pushes to main (not on PRs to avoid fork issues).
+#
+# Best Practices:
+#   • Publish results to OSSF REST API for public visibility
+#   • Upload SARIF to GitHub Code Scanning
+#   • Pinned action SHAs
+# ──────────────────────────────────────────────────────────────────────
+
+name: "OpenSSF Scorecard"
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly — Sunday at 03:00 UTC
+    - cron: "0 3 * * 0"
+
+permissions:
+  contents: read
+
+jobs:
+  scorecard:
+    name: "🏅 OpenSSF Scorecard"
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      security-events: write  # upload SARIF
+      id-token: write         # publish to OSSF API
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard analysis
+        uses: ossf/scorecard-action@f49aabe0b5af0936a0987cfb85d86b75731b0186 # v2.4.1
+        with:
+          results_file: scorecard-results.sarif
+          results_format: sarif
+          # Publish to OpenSSF REST API (public repos only)
+          # Set to true ONLY for public repos. Private repos must use false
+          # to prevent exposing internal repo metadata to the public OSSF API.
+          publish_results: false
+
+      - name: Upload Scorecard SARIF
+        uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.28.18
+        with:
+          sarif_file: scorecard-results.sarif
+          category: scorecard
+
+      - name: Upload Scorecard artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: scorecard-sarif
+          path: scorecard-results.sarif
+          retention-days: 30

@@ -1,0 +1,49 @@
+# ──────────────────────────────────────────────────────────────────────
+# GitHub Advanced Security — Dependency Review
+#
+# Runs on PRs to check new/updated dependencies for:
+#   • Known vulnerabilities (CVEs)
+#   • Restrictive or incompatible licenses
+#   • Deprecated packages
+#
+# This is a GHAS feature — blocks PRs that introduce vulnerable deps.
+#
+# Best Practices:
+#   • Fail on high/critical severity vulnerabilities
+#   • Block copyleft licenses in production dependencies
+#   • Pinned action SHAs
+# ──────────────────────────────────────────────────────────────────────
+
+name: "Dependency Review"
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: "📦 Dependency Review"
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write  # to post review comments
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@da24556b548a50705dd671f47852072ea4c105d9 # v4.7.1
+        with:
+          # Fail on high and critical severity vulnerabilities
+          fail-on-severity: high
+          # Block problematic licenses
+          deny-licenses: GPL-3.0, AGPL-3.0
+          # Comment on PR with findings
+          comment-summary-in-pr: always
+          # Also warn about low/moderate
+          warn-only: false

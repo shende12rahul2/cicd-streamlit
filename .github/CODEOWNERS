@@ -1,0 +1,22 @@
+# ──────────────────────────────────────────────────────────────────────
+# CODEOWNERS — Mandatory reviewers for pull requests
+#
+# Format: <pattern> <@owner1> <@owner2>
+# Owners listed here are REQUIRED to approve PRs touching matched files.
+#
+# Replace @your-org/your-team with your actual GitHub team or usernames.
+# ──────────────────────────────────────────────────────────────────────
+
+# Default: require team review for all changes
+*                           @your-org/platform-team
+
+# Security-sensitive files: require security team review
+.github/workflows/          @your-org/platform-team @your-org/security-team
+.github/dependabot.yml      @your-org/platform-team @your-org/security-team
+.pre-commit-config.yaml     @your-org/platform-team @your-org/security-team
+.secrets.baseline           @your-org/security-team
+requirements.txt            @your-org/platform-team
+
+# Application source code
+src/                        @your-org/platform-team
+app.py                      @your-org/platform-team

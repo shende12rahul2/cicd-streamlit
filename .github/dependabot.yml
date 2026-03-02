@@ -1,0 +1,58 @@
+# ──────────────────────────────────────────────────────────────────────
+# Dependabot Configuration
+#
+# Automatically creates PRs to update:
+#   • pip dependencies (weekly)
+#   • GitHub Actions versions (weekly)
+#
+# Best Practices:
+#   • Grouped updates to reduce PR noise
+#   • Security updates applied immediately
+#   • Labels for easy triage
+# ──────────────────────────────────────────────────────────────────────
+
+version: 2
+updates:
+  # Python pip dependencies
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "deps"
+    groups:
+      # Group minor/patch updates to reduce noise
+      dev-dependencies:
+        patterns:
+          - "black"
+          - "ruff"
+          - "isort"
+          - "bandit"
+          - "detect-secrets"
+          - "pytest*"
+          - "mypy"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # GitHub Actions versions
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"
