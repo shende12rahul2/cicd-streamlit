@@ -1,0 +1,179 @@
+# .github/workflows/pre-commit.yml
+#
+# Enforces pre-commit hooks on every PR.
+# Matches your existing .pre-commit-config.yaml hooks:
+#   - trailing-whitespace, end-of-file-fixer, check-merge-conflict
+#   - mixed-line-endings, check-yaml, check-json
+#   - black, flake8, isort
+#   - gitleaks (secret scanning)
+#   - pip-audit (dependency scan)
+#
+# Fails the PR if:
+#   1. Any hook fails (secret found, lint error, bad YAML, etc.)
+#   2. Hooks modified files — means developer skipped running hooks locally
+
+name: Pre-commit Checks
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - uat
+      - production
+
+concurrency:
+  group: pre-commit-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write   # post PR comment explaining what failed
+
+jobs:
+  pre-commit:
+    name: Run pre-commit hooks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: Cache pre-commit environments
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: pre-commit-
+
+      - name: Run pre-commit on changed files only
+        id: hooks
+        run: |
+          # Get files changed in this PR against the base branch
+          git diff --name-only origin/${{ github.base_ref }}...HEAD > /tmp/changed_files.txt
+
+          echo "=== Files changed in this PR ==="
+          cat /tmp/changed_files.txt
+
+          # Filter to only files that still exist (not deleted)
+          while IFS= read -r file; do
+            [ -f "$file" ] && echo "$file"
+          done < /tmp/changed_files.txt > /tmp/existing_files.txt
+
+          if [ ! -s /tmp/existing_files.txt ]; then
+            echo "No existing files changed - skipping hooks."
+            exit 0
+          fi
+
+          echo "=== Running pre-commit hooks ==="
+          pre-commit run \
+            --files $(cat /tmp/existing_files.txt | tr '\n' ' ') \
+            --show-diff-on-failure \
+            --color always
+        continue-on-error: true
+
+      - name: Check for files modified by hooks
+        id: dirty
+        # Dirty working tree = developer did not run pre-commit locally.
+        # black/flake8/isort would have auto-fixed their files if they had.
+        run: |
+          if ! git diff --quiet; then
+            echo "dirty=true" >> $GITHUB_OUTPUT
+            echo "=== Files modified by pre-commit hooks ==="
+            git diff --name-only
+            echo ""
+            git diff --stat
+          else
+            echo "dirty=false" >> $GITHUB_OUTPUT
+            echo "Working tree is clean."
+          fi
+
+      - name: Post PR comment on failure
+        if: steps.hooks.outcome == 'failure' || steps.dirty.outputs.dirty == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const hooksFailed = '${{ steps.hooks.outcome }}' === 'failure';
+            const dirtyTree   = '${{ steps.dirty.outputs.dirty }}' === 'true';
+
+            const marker = '<!-- pre-commit-result -->';
+            let body = `${marker}\n## Pre-commit Checks Failed\n\n`;
+
+            if (dirtyTree && !hooksFailed) {
+              body += `### You did not run pre-commit hooks locally\n\n`;
+              body += `Pre-commit auto-fixed files during CI (black formatting, isort, whitespace).\n`;
+              body += `These fixes exist only in the CI runner and were never committed to your branch.\n\n`;
+            }
+
+            if (hooksFailed) {
+              body += `### A hook failed and could not auto-fix\n\n`;
+              body += `Common causes:\n`;
+              body += `- **gitleaks** detected a secret or API key\n`;
+              body += `- **flake8** found a lint error black cannot fix\n`;
+              body += `- **pip-audit** found a vulnerable dependency in requirements.txt\n`;
+              body += `- A merge conflict marker was left in a file\n\n`;
+            }
+
+            body += `---\n### How to fix\n\n`;
+            body += `\`\`\`bash\n`;
+            body += `# First time setup (if not done already):\n`;
+            body += `pip install pre-commit\n`;
+            body += `pre-commit install\n\n`;
+            body += `# Run all hooks:\n`;
+            body += `pre-commit run --all-files\n\n`;
+            body += `# Commit and push:\n`;
+            body += `git add -A\n`;
+            body += `git commit -m "fix: apply pre-commit fixes"\n`;
+            body += `git push\n`;
+            body += `\`\`\`\n\n`;
+            body += `---\n_pre-commit · ${new Date().toUTCString()}_`;
+
+            const prNumber = context.payload.pull_request.number;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: prNumber,
+              per_page:     100,
+            });
+
+            const existing = comments.find(c => c.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner:      context.repo.owner,
+                repo:       context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner:        context.repo.owner,
+                repo:         context.repo.repo,
+                issue_number: prNumber,
+                body,
+              });
+            }
+
+      - name: Fail if hooks failed or files were modified
+        if: steps.hooks.outcome == 'failure' || steps.dirty.outputs.dirty == 'true'
+        run: |
+          if [ "${{ steps.dirty.outputs.dirty }}" = "true" ]; then
+            echo "FAILED: pre-commit hooks modified files that were not committed."
+            echo "Run 'pre-commit run --all-files' locally, commit the result, and push."
+          fi
+          if [ "${{ steps.hooks.outcome }}" = "failure" ]; then
+            echo "FAILED: one or more pre-commit hooks failed."
+            echo "Check the output above - likely gitleaks, flake8, or pip-audit."
+          fi
+          exit 1
