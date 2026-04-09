@@ -20,7 +20,7 @@
 #   actions/github-script@v7.0.1 (Node24 rebuild)
 #     SHA: 35ef8b1a1a5a7323505a46360e3e866e4f0e4e9b
 #
-# To update: gh api repos/<owner>/<repo>/commits/<tag> --jq '.sha' 
+# To update: gh api repos/<owner>/<repo>/commits/<tag> --jq '.sha' one
 
 name: CodeQL Security Scan
 
