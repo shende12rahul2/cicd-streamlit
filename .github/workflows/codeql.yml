@@ -189,56 +189,45 @@ jobs:
             const allLoginsSet   = new Set();
 
             for (const alert of alerts) {
-              const loc        = alert.most_recent_instance?.location;
-              const filePath   = loc?.path ?? '';
-              const line       = loc?.start_line ?? 1;
-              const sev        = alert.rule?.security_severity_level ?? 'unknown';
-              const ruleId     = alert.rule?.id ?? 'unknown';
-              const desc       = alert.rule?.description ?? '';
-              const url        = alert.html_url ?? '';
-              const alertNumber = alert.number;   // needed for updateAlert
+              const loc         = alert.most_recent_instance?.location;
+              const filePath    = loc?.path ?? '';
+              const line        = loc?.start_line ?? 1;
+              const sev         = alert.rule?.security_severity_level ?? 'unknown';
+              const ruleId      = alert.rule?.id ?? 'unknown';
+              const desc        = alert.rule?.description ?? '';
+              const url         = alert.html_url ?? '';
+              const alertNumber = alert.number;
+
 
               const { commitHash, authorName, authorEmail } = filePath
                 ? blameLine(filePath, line)
                 : { commitHash: '', authorName: 'Unknown', authorEmail: '' };
 
+
               const login = await resolveLogin(authorEmail, commitHash);
+
               const authorLabel = login
                 ?? (authorEmail ? `${authorName} <${authorEmail}>` : authorName);
 
-              // ── Assign the alert to the blamed author via GraphQL ────────────
-              // The GitHub REST API has NO endpoint to set Code Scanning assignees.
-              // The Assignees field is ONLY writable via GraphQL mutation.
-              // REST  → PATCH /code-scanning/alerts/:id  controls state/dismissal only
-              // GraphQL → updateCodeScanningAlert(assigneeIds:[...])  ← correct API
+              // ── Assign alert to blamed author (REST API — supported since Dec 2025) ──
+              // GitHub added 'assignees' to PATCH /code-scanning/alerts/:id on 2025-12-16.
+              // No GraphQL, no node IDs, no extra queries needed.
               if (login) {
                 const assigneeLogin = login.replace('@', '');
                 try {
-                  // Step 1: get the user's GraphQL node_id from their login
-                  const userResult = await github.graphql(
-                    `query($login: String!) { user(login: $login) { id } }`,
-                    { login: assigneeLogin }
-                  );
-                  const userId = userResult?.user?.id;
-                  if (!userId) throw new Error(`User @${assigneeLogin} not found via GraphQL`);
-
-                  // Step 2: assign the alert using the GraphQL mutation
-                  // alert.node_id is the GraphQL global ID returned by the REST alerts API
-                  const mutation = await github.graphql(
-                    `mutation($alertId: ID!, $userIds: [ID!]!) {
-                       updateCodeScanningAlert(input: { id: $alertId, assigneeIds: $userIds }) {
-                         alert { number assignees { nodes { login } } }
-                       }
-                     }`,
-                    { alertId: alert.node_id, userIds: [userId] }
-                  );
-                  const assigned = mutation?.updateCodeScanningAlert?.alert?.assignees?.nodes
-                    ?.map(n => n.login).join(', ');
-                  core.info(`Alert #${alertNumber} assigned to: ${assigned ?? assigneeLogin}`);
+                  await github.rest.codeScanning.updateAlert({
+                    owner:        context.repo.owner,
+                    repo:         context.repo.repo,
+                    alert_number: alertNumber,
+                    assignees:    [assigneeLogin],   // array of GitHub logins
+                  });
+                  core.info(`✅ Alert #${alertNumber} assigned to @${assigneeLogin}`);
                 } catch (e) {
-                  // Non-fatal — author still notified via PR comment / Issue
+                  // Fails only if user has no write access or token lacks security-events:write
                   core.warning(`Could not assign alert #${alertNumber} to @${assigneeLogin}: ${e.message}`);
                 }
+              } else {
+                core.warning(`Alert #${alertNumber}: login unresolved from git blame — skipping assignment`);
               }
 
               const finding = {
