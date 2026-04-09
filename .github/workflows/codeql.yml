@@ -44,7 +44,6 @@ jobs:
       matrix:
         language:
           - python
-          - javascript-typescript   # CodeQL uses this for TypeScript too
 
     steps:
       # ── 1. Checkout ─────────────────────────────────────────
