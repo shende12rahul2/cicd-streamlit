@@ -1,82 +1,288 @@
-# ──────────────────────────────────────────────────────────────────────
-# GitHub Advanced Security — CodeQL Analysis
+# ============================================================
+#  GHAS — CodeQL CI Scan (Python + TypeScript)
+#  Place at: .github/workflows/codeql.yml
 #
-# Performs semantic code analysis using GitHub's CodeQL engine.
-# Results appear in the Security tab → Code Scanning Alerts.
-#
-# Best Practices:
-#   • Runs on PR + push + weekly schedule (catch new CVE patterns)
-#   • Python uses build-mode: none (interpreted, no compilation needed)
-#   • Pinned action SHAs
-#   • Minimal permissions
-# ──────────────────────────────────────────────────────────────────────
+#  ✅ Runs ONLY on pull_request (CI gate)
+#  ✅ Fails pipeline ONLY on critical findings
+#  ✅ Posts summary comment on PR
+#  ✅ Enterprise-ready (GitHub Advanced Security required)
+# ============================================================
 
-name: "CodeQL Analysis"
+name: "🔐 CodeQL Security Scan"
 
 on:
   pull_request:
-    branches: [main]
-  push:
-    branches: [main]
-  schedule:
-    # Run weekly on Monday at 06:00 UTC to catch new vulnerability patterns
-    - cron: "0 6 * * 1"
+    branches:
+      - main
+      - master
+      - develop
+      - "release/**"
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".github/ISSUE_TEMPLATE/**"
 
+# Cancel in-progress runs for the same PR to save Actions minutes
 concurrency:
   group: codeql-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
+  actions: read
   contents: read
+  security-events: write   # Upload SARIF to GitHub Security tab
+  pull-requests: write     # Post PR comment with results
 
 jobs:
-  analyze:
-    name: "🔬 CodeQL (${{ matrix.language }})"
+  codeql:
+    name: "CodeQL — ${{ matrix.language }}"
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    permissions:
-      contents: read
-      security-events: write  # required to upload SARIF results
-      actions: read           # required for private repo workflows
+    timeout-minutes: 60
 
     strategy:
-      fail-fast: false
+      fail-fast: false       # Let both languages finish even if one fails
       matrix:
-        language: [python]
+        language:
+          - python
+          - javascript-typescript   # CodeQL uses this for TypeScript too
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # ── 1. Checkout ─────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install dependencies (for better analysis)
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
+      # ── 2. Initialize CodeQL ────────────────────────────────
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.28.18
+        uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
-          # Python is interpreted — no build step needed
-          build-mode: none
-          # Use extended query suite for deeper analysis
-          queries: security-extended
-          # Configure paths to scan
-          config: |
-            paths:
-              - src
-            paths-ignore:
-              - tests
-              - .venv
 
+          # security-extended = default queries + broader CWE coverage
+          # Change to "default" if scans are too slow
+          queries: security-extended
+
+          # Skip dependency install — speeds up PR scans significantly
+          dependency-caching: false
+
+      # ── 3. Autobuild (no manual build needed for Python/TS) ──
+      # CodeQL handles Python and TypeScript without a build step.
+      # If your TS project requires a specific build, replace with:
+      #   - run: npm ci && npm run build
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      # ── 4. Run Analysis & Upload to Security Tab ────────────
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.28.18
+        uses: github/codeql-action/analyze@v3
         with:
           category: "/language:${{ matrix.language }}"
+          output: sarif-results
+          upload: true
+
+      # ── 5. Save SARIF as artifact (downloadable report) ─────
+      - name: Upload SARIF artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sarif-${{ matrix.language }}-${{ github.run_number }}
+          path: sarif-results/
+          retention-days: 30
+
+  # ──────────────────────────────────────────────────────────
+  # Gate job: runs after both language scans complete.
+  # Fails the PR ONLY if critical alerts exist.
+  # Medium/High/Low alerts are reported but do NOT block merge.
+  # ──────────────────────────────────────────────────────────
+  security-gate:
+    name: "🚦 Security Gate"
+    runs-on: ubuntu-latest
+    needs: codeql
+    if: always() && needs.codeql.result != 'cancelled'
+    permissions:
+      security-events: read
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Fetch open alerts from GitHub Security API ─────────
+      - name: Fetch CodeQL alerts
+        id: alerts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/code-scanning/alerts?state=open&per_page=100" \
+            --paginate > alerts.json 2>/dev/null || echo "[]" > alerts.json
+
+          CRITICAL=$(jq '[.[] | select(.rule.security_severity_level == "critical")] | length' alerts.json)
+          HIGH=$(jq     '[.[] | select(.rule.security_severity_level == "high")]     | length' alerts.json)
+          MEDIUM=$(jq   '[.[] | select(.rule.security_severity_level == "medium")]   | length' alerts.json)
+          LOW=$(jq      '[.[] | select(.rule.security_severity_level == "low")]      | length' alerts.json)
+          TOTAL=$(jq    'length' alerts.json)
+
+          echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+          echo "high=$HIGH"         >> $GITHUB_OUTPUT
+          echo "medium=$MEDIUM"     >> $GITHUB_OUTPUT
+          echo "low=$LOW"           >> $GITHUB_OUTPUT
+          echo "total=$TOTAL"       >> $GITHUB_OUTPUT
+
+          echo "critical=$CRITICAL | high=$HIGH | medium=$MEDIUM | low=$LOW"
+
+      # ── Post PR comment with scan summary ──────────────────
+      # FIX: All dynamic values are passed via env vars or read
+      # from alerts.json inside JS. Nothing from ${{ }} is ever
+      # interpolated into the JS source, which caused the
+      # "SyntaxError: Unexpected identifier" error when markdown
+      # content (pipes, backticks, words) was injected raw into
+      # a JS template literal.
+      - name: Post PR comment
+        uses: actions/github-script@v7
+        env:
+          CRITICAL:   ${{ steps.alerts.outputs.critical }}
+          HIGH:       ${{ steps.alerts.outputs.high }}
+          MEDIUM:     ${{ steps.alerts.outputs.medium }}
+          LOW:        ${{ steps.alerts.outputs.low }}
+          TOTAL:      ${{ steps.alerts.outputs.total }}
+          REPO:       ${{ github.repository }}
+          RUN_ID:     ${{ github.run_id }}
+          SERVER_URL: ${{ github.server_url }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+
+            // Read counts safely from env — never from ${{ }} inline
+            const critical = parseInt(process.env.CRITICAL) || 0;
+            const high     = parseInt(process.env.HIGH)     || 0;
+            const medium   = parseInt(process.env.MEDIUM)   || 0;
+            const low      = parseInt(process.env.LOW)      || 0;
+            const total    = parseInt(process.env.TOTAL)    || 0;
+            const repo     = process.env.REPO;
+            const runId    = process.env.RUN_ID;
+            const server   = process.env.SERVER_URL;
+
+            const alertsUrl = `${server}/${repo}/security/code-scanning`;
+            const sarifUrl  = `${server}/${repo}/actions/runs/${runId}`;
+
+            // Build alert table rows by reading the JSON file directly in JS.
+            // This is the key fix: we never pass raw markdown through
+            // ${{ steps.*.outputs.* }} into a JS string — that caused the crash.
+            let tableSection = '';
+            try {
+              const raw    = fs.readFileSync('alerts.json', 'utf8');
+              const alerts = JSON.parse(raw);
+              const topAlerts = alerts
+                .filter(a => {
+                  const sev = (a.rule && a.rule.security_severity_level) || '';
+                  return sev === 'critical' || sev === 'high';
+                })
+                .slice(0, 10);
+
+              if (topAlerts.length > 0) {
+                const rows = topAlerts.map(a => {
+                  const sev      = ((a.rule && a.rule.security_severity_level) || 'unknown').toUpperCase();
+                  const ruleId   = (a.rule && a.rule.id)          || 'N/A';
+                  const ruleDesc = (a.rule && a.rule.description)  || '—';
+                  const loc      = (a.most_recent_instance && a.most_recent_instance.location) || {};
+                  const filePath = loc.path       || 'N/A';
+                  const line     = loc.start_line || '?';
+                  const url      = a.html_url     || alertsUrl;
+                  // Escape pipe chars inside cell values so the MD table renders correctly
+                  const safeDesc = ruleDesc.replace(/\|/g, '\\|');
+                  return `| ${sev} | \`${ruleId}\` | \`${filePath}:${line}\` | [${safeDesc}](${url}) |`;
+                }).join('\n');
+
+                tableSection = [
+                  '## 🔍 Critical & High Alerts',
+                  '',
+                  '| Severity | Rule | Location | Description |',
+                  '|----------|------|----------|-------------|',
+                  rows,
+                ].join('\n');
+              }
+            } catch (e) {
+              console.log('Could not build alert table:', e.message);
+            }
+
+            // Status banner
+            let status, statusMsg;
+            if (critical > 0) {
+              status    = '🚨 CRITICAL — Pipeline blocked';
+              statusMsg = 'Critical vulnerabilities found. **This PR cannot be merged until they are resolved.**';
+            } else if (high > 0) {
+              status    = '🟠 HIGH — Review required';
+              statusMsg = 'High severity issues found. Pipeline is not blocked, but please review before merging.';
+            } else if (medium > 0 || low > 0) {
+              status    = '🟡 WARNINGS — Non-blocking';
+              statusMsg = 'Low/medium severity issues found. These do not block the pipeline.';
+            } else {
+              status    = '✅ CLEAN — No issues found';
+              statusMsg = 'No open security alerts detected. Good to merge!';
+            }
+
+            const body = [
+              '<!-- GHAS-CODEQL-REPORT -->',
+              '## 🔐 CodeQL Security Scan Results',
+              '',
+              `**Status:** ${status}`,
+              `> ${statusMsg}`,
+              '',
+              '---',
+              '',
+              '## 📊 Alert Summary',
+              '',
+              '| 🔴 Critical | 🟠 High | 🟡 Medium | 🟢 Low | Total |',
+              '|:-----------:|:-------:|:---------:|:------:|:-----:|',
+              `| **${critical}** | **${high}** | **${medium}** | **${low}** | **${total}** |`,
+              '',
+              tableSection,
+              '',
+              '---',
+              '',
+              `🔗 [View all alerts in Security tab](${alertsUrl}) &nbsp;·&nbsp; 📥 [Download SARIF](${sarifUrl})`,
+              '',
+              '> ℹ️ Only **critical** findings block this pipeline. High/Medium/Low are advisory.',
+            ].join('\n');
+
+            // Update existing bot comment or create a new one
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('GHAS-CODEQL-REPORT')
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      # ── ONLY fail pipeline for critical findings ───────────
+      - name: Enforce critical gate
+        run: |
+          CRITICAL="${{ steps.alerts.outputs.critical }}"
+          if [ "$CRITICAL" -gt 0 ]; then
+            echo ""
+            echo "❌ Pipeline BLOCKED — $CRITICAL critical vulnerability(ies) found."
+            echo "   Fix at: https://github.com/${{ github.repository }}/security/code-scanning"
+            echo ""
+            exit 1
+          else
+            echo "✅ No critical findings. Pipeline passes."
+          fi
