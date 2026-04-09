@@ -66,7 +66,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744  # v4.3.1 (Node24)
+        uses: actions/checkout@v4
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
@@ -105,7 +105,7 @@ jobs:
 
     steps:
       - name: Check alerts & annotate PR
-        uses: actions/github-script@35ef8b1a1a5a7323505a46360e3e866e4f0e4e9b  # v7.0.1 (Node24)
+        uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
