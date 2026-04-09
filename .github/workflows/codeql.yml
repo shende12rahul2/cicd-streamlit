@@ -15,8 +15,8 @@
 #
 #   actions/checkout@v4.3.1
 #     SHA: f43a0e5ff2bd294095638e18286ca9a3d1956744
-#   github/codeql-action/*@v4.1.0
-#     SHA: ce28f5bb42b0c5b8a3b92a322e32e63eded07a9a
+#   github/codeql-action/*@v4
+#     Use tag directly — GitHub-owned action, tag is safe and always resolves
 #   actions/github-script@v7.0.1 (Node24 rebuild)
 #     SHA: 35ef8b1a1a5a7323505a46360e3e866e4f0e4e9b
 #
@@ -69,16 +69,16 @@ jobs:
         uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744  # v4.3.1 (Node24)
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@ce28f5bb42b0c5b8a3b92a322e32e63eded07a9a  # v4.1.0 (Node24)
+        uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
           queries: security-extended
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@ce28f5bb42b0c5b8a3b92a322e32e63eded07a9a  # v4.1.0 (Node24)
+        uses: github/codeql-action/autobuild@v4
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@ce28f5bb42b0c5b8a3b92a322e32e63eded07a9a  # v4.1.0 (Node24)
+        uses: github/codeql-action/analyze@v4
         with:
           category: "/language:${{ matrix.language }}"
           upload: always
