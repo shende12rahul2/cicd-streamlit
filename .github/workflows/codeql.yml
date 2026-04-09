@@ -1,39 +1,127 @@
-name: CodeQL
+# .github/workflows/codeql.yml
+# CodeQL Security Analysis
+# - Scans on every PR and push to dev
+# - Warns on all severity levels
+# - BLOCKS merge on critical findings (via required status check)
+# - No auto-fix, no file modification
+
+name: CodeQL Security Scan
 
 on:
+  push:
+    branches:
+      - dev
+      - main
   pull_request:
-    branches: [main, master, develop, "release/**"]
+    branches:
+      - dev
+      - main
+  schedule:
+    # Weekly full scan every Monday at 02:00 UTC
+    - cron: "0 2 * * 1"
 
 permissions:
   contents: read
   security-events: write
-  actions: read
+  pull-requests: read
 
 jobs:
   analyze:
-    name: Analyze (${{ matrix.language }})
+    name: CodeQL Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
-    timeout-minutes: 60
 
     strategy:
       fail-fast: false
       matrix:
-        language: [python, javascript-typescript]
+        # Add or remove languages to match your repo
+        language:
+          - javascript-typescript
+          - python
+          # - java
+          # - csharp
+          # - go
+          # - ruby
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
+          # Use the default security-extended query suite — covers more CVEs
           queries: security-extended
+          # No config-file that could auto-modify sources
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@v3
+        # Autobuild only compiles — it does NOT modify your source files
 
-      - name: Analyze
+      - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
         with:
-          category: /language:${{ matrix.language }}
+          category: "/language:${{ matrix.language }}"
+          # Upload results to the Security tab
+          upload: always
+
+  # ---------------------------------------------------------------
+  # Gate job: reads the SARIF results and fails on critical severity
+  # This job is set as a REQUIRED status check on the dev branch
+  # ---------------------------------------------------------------
+  check-critical:
+    name: Block on Critical Findings
+    runs-on: ubuntu-latest
+    needs: analyze
+    # Run on PRs targeting dev; also runs on direct pushes to dev
+    if: |
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/dev')
+
+    permissions:
+      contents: read
+      security-events: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for critical CodeQL alerts
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: alerts } = await github.rest.codeScanning.listAlertsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.sha,
+              state: 'open',
+              tool_name: 'CodeQL',
+              per_page: 100,
+            });
+
+            const critical = alerts.filter(a =>
+              a.rule?.security_severity_level === 'critical'
+            );
+
+            const high = alerts.filter(a =>
+              a.rule?.security_severity_level === 'high'
+            );
+
+            // Warn about high findings (informational — does not block)
+            if (high.length > 0) {
+              core.warning(`⚠️  ${high.length} HIGH severity CodeQL finding(s) detected. Review required before merge.`);
+              for (const alert of high) {
+                core.warning(`  [HIGH] ${alert.rule?.id}: ${alert.rule?.description} — ${alert.most_recent_instance?.location?.path}:${alert.most_recent_instance?.location?.start_line}`);
+              }
+            }
+
+            // BLOCK on critical findings
+            if (critical.length > 0) {
+              core.error(`🚨 ${critical.length} CRITICAL severity CodeQL finding(s) detected. Merge is BLOCKED.`);
+              for (const alert of critical) {
+                core.error(`  [CRITICAL] ${alert.rule?.id}: ${alert.rule?.description} — ${alert.most_recent_instance?.location?.path}:${alert.most_recent_instance?.location?.start_line}`);
+              }
+              core.setFailed(`Merge blocked: ${critical.length} critical security issue(s) found by CodeQL.`);
+            } else {
+              core.info(`✅ No critical CodeQL findings. ${high.length} high, ${alerts.length - high.length - critical.length} other findings.`);
+            }
