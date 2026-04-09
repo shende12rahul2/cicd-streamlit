@@ -1,0 +1,284 @@
+# .github/workflows/precommit-adoption.yml
+#
+# Generates a weekly matrix report showing:
+#   - Which developers ARE running pre-commit hooks before pushing
+#   - Which developers are NOT (their PRs consistently fail the pre-commit check)
+#   - Per-developer pass/fail rate for the pre-commit CI check
+#   - Which hook is failing most (gitleaks, flake8, black, etc.)
+#
+# Runs:
+#   - Every Monday at 08:00 UTC (weekly report)
+#   - Can be triggered manually from Actions tab
+#
+# Posts results as:
+#   - A GitHub Issue with a full markdown table (tagged: pre-commit-report)
+#   - Workflow run summary visible in Actions tab
+
+name: Pre-commit Adoption Report
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"   # Every Monday 08:00 UTC
+  workflow_dispatch:        # Manual trigger from Actions tab
+    inputs:
+      days:
+        description: "How many days back to analyse (default: 30)"
+        required: false
+        default: "30"
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write    # create/update the report issue
+  actions: read    # read workflow run results
+
+jobs:
+  generate-report:
+    name: Generate Pre-commit Adoption Matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Generate adoption matrix
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const DAYS_BACK  = parseInt('${{ github.event.inputs.days }}' || '30');
+            const SINCE_DATE = new Date(Date.now() - DAYS_BACK * 86400000).toISOString();
+            const WORKFLOW_NAME = 'Pre-commit Checks';
+
+            core.info(`Analysing pre-commit adoption for the last ${DAYS_BACK} days (since ${SINCE_DATE})`);
+
+            // ── 1. Fetch all PRs merged/opened in the period ──────────────────
+            const { data: pulls } = await github.rest.pulls.list({
+              owner:    context.repo.owner,
+              repo:     context.repo.repo,
+              state:    'all',
+              per_page: 100,
+              sort:     'updated',
+              direction: 'desc',
+            });
+
+            const recentPRs = pulls.filter(pr =>
+              new Date(pr.created_at) >= new Date(SINCE_DATE)
+            );
+
+            core.info(`Found ${recentPRs.length} PRs in the period.`);
+
+            if (recentPRs.length === 0) {
+              core.info('No PRs found in period — skipping report.');
+              return;
+            }
+
+            // ── 2. For each PR, find the pre-commit workflow run result ────────
+            // Data structure: { login: { passed, failed, skipped, failReasons } }
+            const userStats = {};
+
+            for (const pr of recentPRs) {
+              const login = pr.user?.login ?? 'unknown';
+
+              if (!userStats[login]) {
+                userStats[login] = {
+                  login,
+                  passed:      0,
+                  failed:      0,
+                  skipped:     0,   // PR had no pre-commit run at all
+                  prs:         0,
+                  failReasons: {},  // { 'dirty-tree': N, 'hook-failed': N }
+                  prLinks:     [],
+                };
+              }
+
+              userStats[login].prs++;
+
+              // Find workflow runs for this PR's head SHA
+              let runs = [];
+              try {
+                const { data: runsData } = await github.rest.actions.listWorkflowRunsForRepo({
+                  owner:    context.repo.owner,
+                  repo:     context.repo.repo,
+                  event:    'pull_request',
+                  per_page: 50,
+                });
+                runs = runsData.workflow_runs.filter(r =>
+                  r.head_sha === pr.head.sha &&
+                  r.name === WORKFLOW_NAME
+                );
+              } catch (e) {
+                core.warning(`Could not fetch runs for PR #${pr.number}: ${e.message}`);
+              }
+
+              if (runs.length === 0) {
+                userStats[login].skipped++;
+                continue;
+              }
+
+              // Take the most recent run for this PR
+              const latestRun = runs.sort((a, b) =>
+                new Date(b.created_at) - new Date(a.created_at)
+              )[0];
+
+              if (latestRun.conclusion === 'success') {
+                userStats[login].passed++;
+              } else if (['failure', 'timed_out'].includes(latestRun.conclusion)) {
+                userStats[login].failed++;
+                userStats[login].prLinks.push(`#${pr.number}`);
+
+                // Try to detect failure reason from job steps
+                try {
+                  const { data: jobsData } = await github.rest.actions.listJobsForWorkflowRun({
+                    owner:      context.repo.owner,
+                    repo:       context.repo.repo,
+                    run_id:     latestRun.id,
+                    per_page:   10,
+                  });
+
+                  for (const job of jobsData.jobs) {
+                    for (const step of job.steps ?? []) {
+                      if (step.conclusion !== 'failure') continue;
+
+                      if (step.name.toLowerCase().includes('dirty') ||
+                          step.name.toLowerCase().includes('modified')) {
+                        userStats[login].failReasons['skipped-locally'] =
+                          (userStats[login].failReasons['skipped-locally'] ?? 0) + 1;
+                      } else if (step.name.toLowerCase().includes('hook')) {
+                        userStats[login].failReasons['hook-failed'] =
+                          (userStats[login].failReasons['hook-failed'] ?? 0) + 1;
+                      }
+                    }
+                  }
+                } catch (_) {}
+              } else {
+                userStats[login].skipped++;
+              }
+            }
+
+            // ── 3. Build the markdown report ──────────────────────────────────
+            const users = Object.values(userStats).sort((a, b) => {
+              // Sort by: failed first, then by total PRs desc
+              if (b.failed !== a.failed) return b.failed - a.failed;
+              return b.prs - a.prs;
+            });
+
+            const totalUsers   = users.length;
+            const compliantUsers = users.filter(u => u.failed === 0 && u.passed > 0).length;
+            const nonCompliant   = users.filter(u => u.failed > 0).length;
+            const neverRan       = users.filter(u => u.skipped === u.prs && u.passed === 0).length;
+            const complianceRate = totalUsers > 0
+              ? Math.round((compliantUsers / totalUsers) * 100)
+              : 0;
+
+            function statusIcon(user) {
+              if (user.passed > 0 && user.failed === 0) return '✅';
+              if (user.failed > 0 && user.passed > 0)  return '⚠️';
+              if (user.failed > 0 && user.passed === 0) return '❌';
+              return '➖';   // only skipped — no data
+            }
+
+            function passRate(user) {
+              const total = user.passed + user.failed;
+              if (total === 0) return 'No data';
+              return `${Math.round((user.passed / total) * 100)}%`;
+            }
+
+            function failReason(user) {
+              const reasons = Object.entries(user.failReasons);
+              if (reasons.length === 0) return user.failed > 0 ? 'See run logs' : '—';
+              return reasons.map(([k, v]) => `${k}(${v})`).join(', ');
+            }
+
+            let report = `## 📊 Pre-commit Adoption Report\n\n`;
+            report += `**Period:** Last ${DAYS_BACK} days  ·  **Generated:** ${new Date().toUTCString()}\n\n`;
+
+            // Summary banner
+            report += `### Summary\n\n`;
+            report += `| Metric | Value |\n`;
+            report += `|---|---|\n`;
+            report += `| Total contributors with PRs | ${totalUsers} |\n`;
+            report += `| ✅ Always passing pre-commit | ${compliantUsers} |\n`;
+            report += `| ❌ Failing pre-commit | ${nonCompliant} |\n`;
+            report += `| ➖ No pre-commit run detected | ${neverRan} |\n`;
+            report += `| Overall compliance rate | **${complianceRate}%** |\n\n`;
+
+            // Per-developer table
+            report += `### Per-developer breakdown\n\n`;
+            report += `| Status | Developer | PRs | Passed | Failed | Pass Rate | Failure Reason | Failed PRs |\n`;
+            report += `|---|---|---|---|---|---|---|---|\n`;
+
+            for (const u of users) {
+              const prLinkStr = u.prLinks.slice(0, 5).join(', ') +
+                (u.prLinks.length > 5 ? ` +${u.prLinks.length - 5} more` : '');
+              report += `| ${statusIcon(u)} | @${u.login} | ${u.prs} | ${u.passed} | ${u.failed} | ${passRate(u)} | ${failReason(u)} | ${prLinkStr || '—'} |\n`;
+            }
+
+            // Action items section
+            const actionNeeded = users.filter(u => u.failed > 0 || (u.skipped === u.prs && u.passed === 0));
+            if (actionNeeded.length > 0) {
+              report += `\n---\n### Action required\n\n`;
+              report += `The following developers need to set up or fix pre-commit hooks:\n\n`;
+              for (const u of actionNeeded) {
+                if (u.skipped === u.prs && u.passed === 0) {
+                  report += `- @${u.login} — **pre-commit not installed** (no CI runs detected on their PRs)\n`;
+                } else {
+                  report += `- @${u.login} — **${u.failed} failed PR(s)** — failing PRs: ${u.prLinks.join(', ')}\n`;
+                }
+              }
+              report += `\n**Setup instructions:**\n`;
+              report += `\`\`\`bash\npip install pre-commit\npre-commit install\n\`\`\`\n`;
+            }
+
+            report += `\n---\n> _Auto-generated by Pre-commit Adoption Report workflow_`;
+
+            // ── 4. Write to workflow summary ──────────────────────────────────
+            await core.summary.addRaw(report).write();
+            core.info('Written to workflow summary.');
+
+            // ── 5. Create or update a GitHub Issue with the report ────────────
+            const issueTitle  = `📊 Pre-commit Adoption Report — ${new Date().toLocaleDateString('en-CA')}`;
+            const issueMarker = '<!-- precommit-adoption-report -->';
+            const issueBody   = `${issueMarker}\n${report}`;
+            const issueLabel  = 'pre-commit-report';
+
+            // Ensure label exists
+            try {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                name:  issueLabel,
+                color: '0075ca',
+              });
+            } catch (_) {}
+
+            // Find existing open report issue to update
+            const { data: existingIssues } = await github.rest.issues.listForRepo({
+              owner:    context.repo.owner,
+              repo:     context.repo.repo,
+              state:    'open',
+              labels:   issueLabel,
+              per_page: 10,
+            });
+
+            const existing = existingIssues.find(i => i.body?.includes(issueMarker));
+
+            if (existing) {
+              // Close old report and open a fresh one each week
+              await github.rest.issues.update({
+                owner:        context.repo.owner,
+                repo:         context.repo.repo,
+                issue_number: existing.number,
+                state:        'closed',
+              });
+              core.info(`Closed old report issue #${existing.number}`);
+            }
+
+            const { data: newIssue } = await github.rest.issues.create({
+              owner:  context.repo.owner,
+              repo:   context.repo.repo,
+              title:  issueTitle,
+              body:   issueBody,
+              labels: [issueLabel],
+            });
+
+            core.info(`Report issue created: #${newIssue.number} — ${newIssue.html_url}`);
+            core.notice(`Pre-commit adoption: ${complianceRate}% (${compliantUsers}/${totalUsers} developers compliant)`);
