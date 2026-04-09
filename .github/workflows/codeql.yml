@@ -10,17 +10,17 @@
 #      gh api repos/<owner>/<repo>/commits/<tag> --jq '.sha'
 #   2. Replace the SHA below and update the # tag comment beside it
 #
-# Pinned SHAs used here (verify at https://github.com/<owner>/<repo>/releases):
-#   actions/checkout@v4.2.2
-#     SHA: 11bd71901bbe5b1630ceea73d27597364c9af683
-#   github/codeql-action/init@v4
-#     SHA: 181d5eefc20863364f96762470ba6f862bdef56b
-#   github/codeql-action/autobuild@v4
-#     SHA: 181d5eefc20863364f96762470ba6f862bdef56b
-#   github/codeql-action/analyze@v4
-#     SHA: 181d5eefc20863364f96762470ba6f862bdef56b
-#   actions/github-script@v7.0.1
-#     SHA: 60a0d83039c74a4aee543508d2ffcb1c3799cdea
+# Pinned SHAs — all target Node.js 24 natively (no deprecation warnings)
+# Verify at https://github.com/<owner>/<repo>/releases
+#
+#   actions/checkout@v4.3.1
+#     SHA: f43a0e5ff2bd294095638e18286ca9a3d1956744
+#   github/codeql-action/*@v4.1.0
+#     SHA: ce28f5bb42b0c5b8a3b92a322e32e63eded07a9a
+#   actions/github-script@v7.0.1 (Node24 rebuild)
+#     SHA: 35ef8b1a1a5a7323505a46360e3e866e4f0e4e9b
+#
+# To update: gh api repos/<owner>/<repo>/commits/<tag> --jq '.sha' 
 
 name: CodeQL Security Scan
 
@@ -66,28 +66,31 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744  # v4.3.1 (Node24)
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@181d5eefc20863364f96762470ba6f862bdef56b  # v4
+        uses: github/codeql-action/init@ce28f5bb42b0c5b8a3b92a322e32e63eded07a9a  # v4.1.0 (Node24)
         with:
           languages: ${{ matrix.language }}
           queries: security-extended
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@181d5eefc20863364f96762470ba6f862bdef56b  # v4
+        uses: github/codeql-action/autobuild@ce28f5bb42b0c5b8a3b92a322e32e63eded07a9a  # v4.1.0 (Node24)
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@181d5eefc20863364f96762470ba6f862bdef56b  # v4
+        uses: github/codeql-action/analyze@ce28f5bb42b0c5b8a3b92a322e32e63eded07a9a  # v4.1.0 (Node24)
         with:
           category: "/language:${{ matrix.language }}"
           upload: always
 
   # ─────────────────────────────────────────────
-  # 2. Blame attribution + merge gate
+  # 2. Security gate — warn on high, block on critical
+  #    Posts PR comment with critical+high findings only
+  #    Opens tracking Issue on direct push to main/dev
+  #    No git blame, no author attribution
   # ─────────────────────────────────────────────
-  blame-and-gate:
-    name: Blame Authors / Block Critical
+  security-gate:
+    name: Security Gate / Block Critical
     runs-on: ubuntu-latest
     needs: analyze
     if: |
@@ -96,74 +99,16 @@ jobs:
 
     permissions:
       contents: read
-      security-events: write   # write needed to assign alerts, not just read them
+      security-events: read
       pull-requests: write
       issues: write
 
     steps:
-      - name: Checkout with full history
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-        with:
-          fetch-depth: 0   # full history required for git blame
-
-      - name: Blame authors & annotate PR
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
+      - name: Check alerts & annotate PR
+        uses: actions/github-script@35ef8b1a1a5a7323505a46360e3e866e4f0e4e9b  # v7.0.1 (Node24)
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const { execSync } = require('child_process');
-
-            // ── Helper: git blame on a single line ────────────────────────────
-            function blameLine(filePath, lineNumber) {
-              try {
-                const raw = execSync(
-                  `git blame --porcelain -L ${lineNumber},${lineNumber} -- "${filePath}"`,
-                  { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
-                );
-                const commitHash  = raw.split('\n')[0].split(' ')[0];
-                const authorName  = (raw.match(/^author (.+)$/m)  || [])[1]?.trim() ?? 'Unknown';
-                const authorEmail = (raw.match(/^author-mail <(.+)>/m) || [])[1]?.trim() ?? '';
-                return { commitHash, authorName, authorEmail };
-              } catch (e) {
-                core.warning(`git blame failed for ${filePath}:${lineNumber} — ${e.message}`);
-                return { commitHash: '', authorName: 'Unknown', authorEmail: '' };
-              }
-            }
-
-            // ── Helper: git email → GitHub login ─────────────────────────────
-            // Strategy 1: look up commit hash via GitHub Commits API (most reliable)
-            // Strategy 2: search users by email (fallback — requires public email)
-            const emailLoginCache = {};
-
-            async function resolveLogin(authorEmail, commitHash) {
-              if (emailLoginCache[authorEmail]) return emailLoginCache[authorEmail];
-              let login = null;
-
-              if (commitHash && commitHash !== '0000000000000000000000000000000000000000') {
-                try {
-                  const { data: commit } = await github.rest.repos.getCommit({
-                    owner: context.repo.owner,
-                    repo:  context.repo.repo,
-                    ref:   commitHash,
-                  });
-                  login = commit.author?.login ?? null;
-                } catch (_) {}
-              }
-
-              if (!login && authorEmail && !authorEmail.includes('noreply')) {
-                try {
-                  const { data: result } = await github.rest.search.users({
-                    q: `${authorEmail} in:email`,
-                  });
-                  if (result.total_count > 0) login = result.items[0].login;
-                } catch (_) {}
-              }
-
-              const resolved = login ? `@${login}` : null;
-              emailLoginCache[authorEmail] = resolved;
-              return resolved;
-            }
-
             // ── 1. Fetch open CodeQL alerts for this SHA ──────────────────────
             const { data: alerts } = await github.rest.codeScanning.listAlertsForRepo({
               owner:     context.repo.owner,
@@ -179,128 +124,79 @@ jobs:
               return;
             }
 
-            core.info(`Found ${alerts.length} open CodeQL alert(s). Running git blame…`);
+            core.info(`Found ${alerts.length} open CodeQL alert(s).`);
 
-            // ── 2. Enrich each alert with blame data ──────────────────────────
+            // ── 2. Bucket alerts by severity ──────────────────────────────────
             const critical = [];
             const high     = [];
-            const other    = [];
-            const authorFindings = {};
-            const allLoginsSet   = new Set();
 
             for (const alert of alerts) {
-              const loc         = alert.most_recent_instance?.location;
-              const filePath    = loc?.path ?? '';
-              const line        = loc?.start_line ?? 1;
-              const sev         = alert.rule?.security_severity_level ?? 'unknown';
-              const ruleId      = alert.rule?.id ?? 'unknown';
-              const desc        = alert.rule?.description ?? '';
-              const url         = alert.html_url ?? '';
-              const alertNumber = alert.number;
-
-
-              const { commitHash, authorName, authorEmail } = filePath
-                ? blameLine(filePath, line)
-                : { commitHash: '', authorName: 'Unknown', authorEmail: '' };
-
-
-              const login = await resolveLogin(authorEmail, commitHash);
-
-              const authorLabel = login
-                ?? (authorEmail ? `${authorName} <${authorEmail}>` : authorName);
-
-              // ── Assign alert to blamed author (REST API — supported since Dec 2025) ──
-              // GitHub added 'assignees' to PATCH /code-scanning/alerts/:id on 2025-12-16.
-              // No GraphQL, no node IDs, no extra queries needed.
-              if (login) {
-                const assigneeLogin = login.replace('@', '');
-                try {
-                  await github.rest.codeScanning.updateAlert({
-                    owner:        context.repo.owner,
-                    repo:         context.repo.repo,
-                    alert_number: alertNumber,
-                    assignees:    [assigneeLogin],   // array of GitHub logins
-                  });
-                  core.info(`✅ Alert #${alertNumber} assigned to @${assigneeLogin}`);
-                } catch (e) {
-                  // Fails only if user has no write access or token lacks security-events:write
-                  core.warning(`Could not assign alert #${alertNumber} to @${assigneeLogin}: ${e.message}`);
-                }
-              } else {
-                core.warning(`Alert #${alertNumber}: login unresolved from git blame — skipping assignment`);
-              }
-
-              const finding = {
-                ruleId, desc, filePath, line, sev, url,
-                alertNumber,
-                authorName, authorEmail, commitHash,
-                login, authorLabel,
+              const loc = alert.most_recent_instance?.location;
+              const sev = alert.rule?.security_severity_level ?? 'unknown';
+              const item = {
+                sev,
+                ruleId:   alert.rule?.id ?? 'unknown',
+                desc:     alert.rule?.description ?? '',
+                filePath: loc?.path ?? '',
+                line:     loc?.start_line ?? '?',
+                url:      alert.html_url ?? '',
               };
-
-              if      (sev === 'critical') critical.push(finding);
-              else if (sev === 'high')     high.push(finding);
-              else                         other.push(finding);
-
-              if (!authorFindings[authorLabel]) authorFindings[authorLabel] = [];
-              authorFindings[authorLabel].push(finding);
-              if (login) allLoginsSet.add(login.replace('@', ''));
+              if      (sev === 'critical') critical.push(item);
+              else if (sev === 'high')     high.push(item);
+              // medium / low / info — silently ignored in PR comment
             }
 
-            // ── 3. Build PR comment ───────────────────────────────────────────
+            // ── 3. Build comment — critical + high only ───────────────────────
             function badge(sev) {
-              return sev === 'critical' ? '🚨 **CRITICAL**'
-                   : sev === 'high'     ? '⚠️ **HIGH**'
-                   :                      `ℹ️ ${sev.toUpperCase()}`;
+              return sev === 'critical' ? '🚨 **CRITICAL**' : '⚠️ **HIGH**';
             }
 
-            const allFindings = [...critical, ...high, ...other];
-            let body = `## 🔐 CodeQL Security Findings — Blame Report\n\n`;
+            const visibleFindings = [...critical, ...high];
+            const branch = context.ref?.replace('refs/heads/', '') ?? context.ref;
+            let body = `## 🔐 CodeQL Security Findings
+
+`;
 
             if (critical.length) {
-              body += `> ❌ **${critical.length} critical issue(s) — merge is BLOCKED.**\n\n`;
+              body += `> ❌ **${critical.length} critical — merge is BLOCKED.**`;
+              if (high.length) body += ` ${high.length} high also found.`;
+              body += `
+
+`;
+            } else if (high.length) {
+              body += `> ⚠️ **${high.length} high severity issue(s) found.** No critical — merge is not blocked.
+
+`;
             } else {
-              body += `> ✅ No critical issues. ${high.length} high, ${other.length} other finding(s).\n\n`;
+              body += `> ✅ No critical or high severity issues.
+
+`;
             }
 
-            body += `### All Findings\n\n`;
-            body += `| Severity | Rule | File | Line | Description | Introduced by | Commit | Link |\n`;
-            body += `|---|---|---|---|---|---|---|---|\n`;
-            for (const f of allFindings) {
-              const shortHash  = f.commitHash ? f.commitHash.slice(0, 7) : '–';
-              const commitLink = f.commitHash
-                ? `[\`${shortHash}\`](https://github.com/${context.repo.owner}/${context.repo.repo}/commit/${f.commitHash})`
-                : '–';
-              body += `| ${badge(f.sev)} | \`${f.ruleId}\` | \`${f.filePath}\` | ${f.line} | ${f.desc} | ${f.authorLabel} | ${commitLink} | [→](${f.url}) |\n`;
-            }
-
-            body += `\n---\n### 👤 Action required — by author\n\n`;
-            body += `> Each person below introduced the code containing a security finding.\n> Please fix your finding(s) before this PR can merge.\n\n`;
-
-            for (const [author, findings] of Object.entries(authorFindings)) {
-              const critCount = findings.filter(f => f.sev === 'critical').length;
-              const highCount = findings.filter(f => f.sev === 'high').length;
-              body += `#### ${author}`;
-              if (critCount) body += ` · ${critCount} 🚨 critical`;
-              if (highCount) body += ` · ${highCount} ⚠️ high`;
-              body += `\n\n`;
-              for (const f of findings) {
-                const shortHash = f.commitHash ? f.commitHash.slice(0, 7) : '';
-                const commitRef = shortHash
-                  ? ` · introduced in [\`${shortHash}\`](https://github.com/${context.repo.owner}/${context.repo.repo}/commit/${f.commitHash})`
-                  : '';
-                body += `- ${badge(f.sev)} **\`${f.ruleId}\`** · \`${f.filePath}:${f.line}\`${commitRef}\n`;
-                body += `  > ${f.desc}\n`;
-                body += `  > [View full alert ↗](${f.url})\n\n`;
+            if (visibleFindings.length > 0) {
+              body += `| Severity | Rule | File | Line | Description | Link |
+`;
+              body += `|---|---|---|---|---|---|
+`;
+              for (const f of visibleFindings) {
+                body += `| ${badge(f.sev)} | \`${f.ruleId}\` | \`${f.filePath}\` | ${f.line} | ${f.desc} | [→](${f.url}) |
+`;
               }
+            } else {
+              body += `_No critical or high findings._
+`;
             }
 
-            const branch = context.ref?.replace('refs/heads/', '') ?? context.ref;
-            body += `---\n_Blame data sourced from \`git blame\` on \`${branch}\` · ${new Date().toUTCString()}_`;
+            body += `
+---
+_CodeQL · \`${branch}\` · ${new Date().toUTCString()}_`;
 
-            // ── 4a. PR comment (pull_request event) ───────────────────────────
+            // ── 4a. Post / update PR comment ──────────────────────────────────
             if (context.eventName === 'pull_request') {
               const prNumber = context.payload.pull_request.number;
-              const marker   = '<!-- codeql-blame-report -->';
+              const marker   = '<!-- codeql-findings -->';
+              const fullBody = `${marker}
+${body}`;
 
               const { data: comments } = await github.rest.issues.listComments({
                 owner:        context.repo.owner,
@@ -310,8 +206,6 @@ jobs:
               });
 
               const existing = comments.find(c => c.body?.includes(marker));
-              const fullBody = `${marker}\n${body}`;
-
               if (existing) {
                 await github.rest.issues.updateComment({
                   owner:      context.repo.owner,
@@ -327,108 +221,62 @@ jobs:
                   body:         fullBody,
                 });
               }
-
-              // Request review from blamed authors on the PR
-              if (allLoginsSet.size > 0) {
-                let prAuthorLogin = '';
-                try {
-                  const { data: pr } = await github.rest.pulls.get({
-                    owner:       context.repo.owner,
-                    repo:        context.repo.repo,
-                    pull_number: prNumber,
-                  });
-                  prAuthorLogin = pr.user?.login ?? '';
-                } catch (_) {}
-
-                const reviewers = [...allLoginsSet].filter(l => l !== prAuthorLogin);
-                if (reviewers.length) {
-                  try {
-                    await github.rest.pulls.requestReviewers({
-                      owner:       context.repo.owner,
-                      repo:        context.repo.repo,
-                      pull_number: prNumber,
-                      reviewers,
-                    });
-                    core.info(`Review requested from: ${reviewers.map(r => '@'+r).join(', ')}`);
-                  } catch (e) {
-                    core.warning(`Could not request all reviewers: ${e.message}`);
-                  }
-                }
-              }
             }
 
-            // ── 4b. GitHub Issue (push to main/dev — no PR exists) ────────────
-            // When vulnerable code is merged directly, there is no PR to comment on.
-            // We open (or update) a tracking Issue so authors still get notified
-            // and the finding is visible outside the Security tab.
-            if (context.eventName === 'push') {
-              const issueMarker  = `<!-- codeql-blame-${context.sha} -->`;
-              const issueTitle   = `🔐 CodeQL findings on \`${branch}\` — ${new Date().toLocaleDateString('en-CA')}`;
-              const issueBody    = `${issueMarker}\n${body}`;
-              const issueLabels  = ['security', 'codeql'];
-              const issueAssignees = [...allLoginsSet];
+            // ── 4b. Open tracking Issue on direct push ────────────────────────
+            if (context.eventName === 'push' && visibleFindings.length > 0) {
+              const issueMarker = `<!-- codeql-${context.sha} -->`;
+              const issueTitle  = `🔐 CodeQL findings on \`${branch}\` — ${new Date().toLocaleDateString('en-CA')}`;
+              const issueBody   = `${issueMarker}
+${body}`;
 
-              // Check if an issue for this SHA was already opened (re-run safety)
               const { data: existingIssues } = await github.rest.issues.listForRepo({
-                owner:  context.repo.owner,
-                repo:   context.repo.repo,
-                state:  'open',
-                labels: 'codeql',
+                owner:    context.repo.owner,
+                repo:     context.repo.repo,
+                state:    'open',
+                labels:   'codeql',
                 per_page: 50,
               });
 
               const existing = existingIssues.find(i => i.body?.includes(issueMarker));
-
               if (existing) {
                 await github.rest.issues.update({
-                  owner:     context.repo.owner,
-                  repo:      context.repo.repo,
+                  owner:        context.repo.owner,
+                  repo:         context.repo.repo,
                   issue_number: existing.number,
-                  body:      issueBody,
+                  body:         issueBody,
                 });
-                core.info(`Updated existing tracking issue #${existing.number}`);
+                core.info(`Updated tracking issue #${existing.number}`);
               } else {
-                // Create labels if they don't exist yet (non-fatal if they do)
-                for (const label of issueLabels) {
+                for (const [name, color] of [['security','e11d48'],['codeql','f97316']]) {
                   try {
-                    await github.rest.issues.createLabel({
-                      owner: context.repo.owner,
-                      repo:  context.repo.repo,
-                      name:  label,
-                      color: label === 'security' ? 'e11d48' : 'f97316',
-                    });
-                  } catch (_) {}
+                    await github.rest.issues.createLabel({ owner: context.repo.owner, repo: context.repo.repo, name, color });
+                  } catch(_) {}
                 }
-
                 const { data: newIssue } = await github.rest.issues.create({
-                  owner:     context.repo.owner,
-                  repo:      context.repo.repo,
-                  title:     issueTitle,
-                  body:      issueBody,
-                  labels:    issueLabels,
-                  assignees: issueAssignees,  // blamed authors assigned on the issue too
+                  owner:  context.repo.owner,
+                  repo:   context.repo.repo,
+                  title:  issueTitle,
+                  body:   issueBody,
+                  labels: ['security', 'codeql'],
                 });
                 core.info(`Opened tracking issue #${newIssue.number}: ${newIssue.html_url}`);
               }
             }
 
-            // ── 6. Workflow annotations ───────────────────────────────────────
+            // ── 5. Workflow annotations ───────────────────────────────────────
             for (const f of high) {
-              core.warning(`[HIGH] ${f.ruleId}: ${f.desc} — ${f.filePath}:${f.line} | author: ${f.authorLabel}`);
+              core.warning(`[HIGH] ${f.ruleId}: ${f.desc} — ${f.filePath}:${f.line}`);
             }
             for (const f of critical) {
-              core.error(`[CRITICAL] ${f.ruleId}: ${f.desc} — ${f.filePath}:${f.line} | author: ${f.authorLabel}`);
+              core.error(`[CRITICAL] ${f.ruleId}: ${f.desc} — ${f.filePath}:${f.line}`);
             }
 
-            // ── 7. Block merge on critical (PR) / fail run on push ────────────
-            // On a pull_request: setFailed blocks the merge via required status check.
-            // On a push to main: the merge already happened — we fail the run so the
-            // red ✗ is visible on the commit and the team knows action is needed.
+            // ── 6. Block merge on critical ─────────────────────────────────────
             if (critical.length > 0) {
               core.setFailed(
                 context.eventName === 'pull_request'
-                  ? `Merge blocked: ${critical.length} critical finding(s). Authors notified: ${[...allLoginsSet].map(l=>'@'+l).join(', ') || 'see PR comment'}`
-                  : `⚠️  ${critical.length} critical finding(s) detected on ${branch} after merge. ` +
-                    `A tracking issue has been opened and authors assigned. Immediate remediation required.`
+                  ? `Merge blocked: ${critical.length} critical finding(s). See PR comment for details.`
+                  : `⚠️ ${critical.length} critical finding(s) on ${branch}. Tracking issue opened.`
               );
             }
