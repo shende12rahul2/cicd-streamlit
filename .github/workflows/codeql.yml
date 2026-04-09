@@ -1,12 +1,11 @@
 # .github/workflows/codeql.yml
 # CodeQL Security Analysis
-# - Scans on every PR and push to dev / main
-# - Warns on all severity levels
-# - BLOCKS merge on critical findings (via required status check)
-# - Uses `git blame` on the exact vulnerable line to find who wrote it
-# - Maps git commit email → GitHub login via the GitHub API
-# - Tags the author directly in the PR comment and requests their review
-# - No CODEOWNERS dependency, no auto-fix, no file modification
+# Action versions pinned to Node.js 24 compatible releases:
+#   actions/checkout@v4.2.2         (Node 24 support added in 4.2.x)
+#   github/codeql-action/*@v4       (v3 deprecated Dec 2026 — use v4)
+#   actions/github-script@v7.0.1    (Node 24 support added in 7.0.1)
+# Env flag FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true opts in now ahead of
+# the June 2026 forced cutover.
 
 name: CodeQL Security Scan
 
@@ -21,6 +20,13 @@ on:
       - main
   schedule:
     - cron: "0 2 * * 1"
+
+env:
+  # Opt into Node.js 24 runtime now — avoids the forced cutover warning
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Opt out of skipping file coverage on PRs if you need it; leave false
+  # for the default perf improvement starting April 2026
+  CODEQL_ACTION_FILE_COVERAGE_ON_PRS: false
 
 permissions:
   contents: read
@@ -39,7 +45,7 @@ jobs:
       fail-fast: false
       matrix:
         language:
-          # - javascript-typescript
+          #- javascript-typescript
           - python
           # - java
           # - csharp
@@ -48,33 +54,26 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2   # Node 24 compatible
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4   # v4 required — v3 deprecated Dec 2026
         with:
           languages: ${{ matrix.language }}
-          queries: security-extended
+         # queries: security-extended
+          queries: security-and-quality
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
+        uses: github/codeql-action/autobuild@v4   # v4
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4   # v4
         with:
           category: "/language:${{ matrix.language }}"
           upload: always
 
   # ─────────────────────────────────────────────
   # 2. Blame attribution + gate
-  #    Flow per alert:
-  #      git blame <file> -L <line>,<line>
-  #        → commit hash + author email
-  #      GitHub API: GET /repos/search/commits?q=hash
-  #        → GitHub login for that commit
-  #      Post PR comment with per-author breakdown
-  #      Request their review
-  #      Block merge if any critical found
   # ─────────────────────────────────────────────
   blame-and-gate:
     name: Blame Authors / Block Critical
@@ -92,32 +91,27 @@ jobs:
 
     steps:
       - name: Checkout with full history
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2   # Node 24 compatible
         with:
-          # Full history is required for git blame to work on any line
-          fetch-depth: 0
+          fetch-depth: 0   # full history required for git blame
 
       - name: Blame authors & annotate PR
-        uses: actions/github-script@v7
+        uses: actions/github-script@v7.0.1   # Node 24 compatible
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const { execSync } = require('child_process');
 
             // ── Helper: run git blame on a single line ────────────────────────
-            // Returns { commitHash, authorName, authorEmail }
             function blameLine(filePath, lineNumber) {
               try {
-                // --porcelain gives stable machine-readable output
                 const raw = execSync(
                   `git blame --porcelain -L ${lineNumber},${lineNumber} -- "${filePath}"`,
                   { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
                 );
-
                 const commitHash  = raw.split('\n')[0].split(' ')[0];
                 const authorName  = (raw.match(/^author (.+)$/m)  || [])[1]?.trim() ?? 'Unknown';
                 const authorEmail = (raw.match(/^author-mail <(.+)>/m) || [])[1]?.trim() ?? '';
-
                 return { commitHash, authorName, authorEmail };
               } catch (e) {
                 core.warning(`git blame failed for ${filePath}:${lineNumber} — ${e.message}`);
@@ -126,8 +120,8 @@ jobs:
             }
 
             // ── Helper: resolve git email → GitHub login ──────────────────────
-            // Strategy 1: search commits by hash (most reliable)
-            // Strategy 2: search users by email (fallback, may be private)
+            // Strategy 1: look up commit hash via GitHub API (most reliable)
+            // Strategy 2: search users by email (fallback, requires public email)
             const emailLoginCache = {};
 
             async function resolveLogin(authorEmail, commitHash) {
@@ -135,26 +129,24 @@ jobs:
 
               let login = null;
 
-              // Strategy 1 — find commit in GitHub by hash, read its author login
               if (commitHash && commitHash !== '0000000000000000000000000000000000000000') {
                 try {
                   const { data: commit } = await github.rest.repos.getCommit({
-                    owner:  context.repo.owner,
-                    repo:   context.repo.repo,
-                    ref:    commitHash,
+                    owner: context.repo.owner,
+                    repo:  context.repo.repo,
+                    ref:   commitHash,
                   });
                   login = commit.author?.login ?? null;
-                } catch (_) { /* commit may not be in GitHub yet */ }
+                } catch (_) {}
               }
 
-              // Strategy 2 — search GitHub users by email (works if email is public)
               if (!login && authorEmail && !authorEmail.includes('noreply')) {
                 try {
                   const { data: result } = await github.rest.search.users({
                     q: `${authorEmail} in:email`,
                   });
                   if (result.total_count > 0) login = result.items[0].login;
-                } catch (_) { /* rate-limited or private email */ }
+                } catch (_) {}
               }
 
               const resolved = login ? `@${login}` : null;
@@ -162,7 +154,7 @@ jobs:
               return resolved;
             }
 
-            // ── 1. Fetch CodeQL alerts ─────────────────────────────────────────
+            // ── 1. Fetch open CodeQL alerts for this SHA ──────────────────────
             const { data: alerts } = await github.rest.codeScanning.listAlertsForRepo({
               owner:     context.repo.owner,
               repo:      context.repo.repo,
@@ -183,8 +175,6 @@ jobs:
             const critical = [];
             const high     = [];
             const other    = [];
-
-            // authorFindings: { '@login' | 'Name <email>': [finding, ...] }
             const authorFindings = {};
             const allLoginsSet   = new Set();
 
@@ -197,23 +187,18 @@ jobs:
               const desc     = alert.rule?.description ?? '';
               const url      = alert.html_url ?? '';
 
-              // Run blame
               const { commitHash, authorName, authorEmail } = filePath
                 ? blameLine(filePath, line)
                 : { commitHash: '', authorName: 'Unknown', authorEmail: '' };
 
-              // Resolve to GitHub login
               const login = await resolveLogin(authorEmail, commitHash);
-
-              // Display label — prefer @login, fall back to "Name <email>"
               const authorLabel = login
                 ?? (authorEmail ? `${authorName} <${authorEmail}>` : authorName);
 
               const finding = {
                 ruleId, desc, filePath, line, sev, url,
                 authorName, authorEmail, commitHash,
-                login,        // @handle or null
-                authorLabel,  // display string
+                login, authorLabel,
               };
 
               if      (sev === 'critical') critical.push(finding);
@@ -222,7 +207,6 @@ jobs:
 
               if (!authorFindings[authorLabel]) authorFindings[authorLabel] = [];
               authorFindings[authorLabel].push(finding);
-
               if (login) allLoginsSet.add(login.replace('@', ''));
             }
 
@@ -243,19 +227,17 @@ jobs:
               body += `> ✅ No critical issues. ${high.length} high, ${other.length} other finding(s).\n\n`;
             }
 
-            // Full findings table
             body += `### All Findings\n\n`;
             body += `| Severity | Rule | File | Line | Description | Introduced by | Commit | Link |\n`;
             body += `|---|---|---|---|---|---|---|---|\n`;
             for (const f of allFindings) {
-              const shortHash = f.commitHash ? f.commitHash.slice(0, 7) : '–';
+              const shortHash  = f.commitHash ? f.commitHash.slice(0, 7) : '–';
               const commitLink = f.commitHash
                 ? `[\`${shortHash}\`](https://github.com/${context.repo.owner}/${context.repo.repo}/commit/${f.commitHash})`
                 : '–';
               body += `| ${badge(f.sev)} | \`${f.ruleId}\` | \`${f.filePath}\` | ${f.line} | ${f.desc} | ${f.authorLabel} | ${commitLink} | [→](${f.url}) |\n`;
             }
 
-            // Per-author action section — this is what each developer sees
             body += `\n---\n### 👤 Action required — by author\n\n`;
             body += `> Each person below introduced the code containing a security finding.\n> Please review and fix your finding(s) before this PR can merge.\n\n`;
 
@@ -269,8 +251,8 @@ jobs:
               body += `\n\n`;
 
               for (const f of findings) {
-                const shortHash = f.commitHash ? f.commitHash.slice(0, 7) : '';
-                const commitRef = shortHash
+                const shortHash  = f.commitHash ? f.commitHash.slice(0, 7) : '';
+                const commitRef  = shortHash
                   ? ` · introduced in [\`${shortHash}\`](https://github.com/${context.repo.owner}/${context.repo.repo}/commit/${f.commitHash})`
                   : '';
                 body += `- ${badge(f.sev)} **\`${f.ruleId}\`** · \`${f.filePath}:${f.line}\`${commitRef}\n`;
@@ -315,8 +297,6 @@ jobs:
               }
 
               // ── 5. Request review from blamed authors ──────────────────────
-              // Only GitHub logins can be added as reviewers (not raw emails)
-              // Skip the PR author — GitHub rejects self-review requests
               if (allLoginsSet.size > 0) {
                 let prAuthorLogin = '';
                 try {
@@ -329,7 +309,6 @@ jobs:
                 } catch (_) {}
 
                 const reviewers = [...allLoginsSet].filter(l => l !== prAuthorLogin);
-
                 if (reviewers.length) {
                   try {
                     await github.rest.pulls.requestReviewers({
@@ -338,7 +317,7 @@ jobs:
                       pull_number: prNumber,
                       reviewers,
                     });
-                    core.info(`Review requested from blamed authors: ${reviewers.map(r => '@'+r).join(', ')}`);
+                    core.info(`Review requested from: ${reviewers.map(r => '@'+r).join(', ')}`);
                   } catch (e) {
                     core.warning(`Could not request all reviewers: ${e.message}`);
                   }
@@ -346,7 +325,7 @@ jobs:
               }
             }
 
-            // ── 6. Annotate the workflow run log ──────────────────────────────
+            // ── 6. Workflow run annotations ───────────────────────────────────
             for (const f of high) {
               core.warning(`[HIGH] ${f.ruleId}: ${f.desc} — ${f.filePath}:${f.line} | author: ${f.authorLabel}`);
             }
@@ -358,6 +337,6 @@ jobs:
             if (critical.length > 0) {
               core.setFailed(
                 `Merge blocked: ${critical.length} critical finding(s). ` +
-                `Authors notified: ${[...allLoginsSet].map(l=>'@'+l).join(', ') || 'see PR comment'}`
+                `Authors notified: ${[...allLoginsSet].map(l => '@'+l).join(', ') || 'see PR comment'}`
               );
             }
