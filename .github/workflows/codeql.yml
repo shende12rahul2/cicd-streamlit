@@ -20,7 +20,7 @@
 #   actions/github-script@v7.0.1 (Node24 rebuild)
 #     SHA: 35ef8b1a1a5a7323505a46360e3e866e4f0e4e9b
 #
-# To update: gh api repos/<owner>/<repo>/commits/<tag> --jq '.sha' one
+# To update: gh api repos/<owner>/<repo>/commits/<tag> --jq '.sha' 
 
 name: CodeQL Security Scan
 
@@ -153,50 +153,35 @@ jobs:
 
             const visibleFindings = [...critical, ...high];
             const branch = context.ref?.replace('refs/heads/', '') ?? context.ref;
-            let body = `## 🔐 CodeQL Security Findings
-
-`;
+            let body = `## 🔐 CodeQL Security Findings\n\n`;
 
             if (critical.length) {
               body += `> ❌ **${critical.length} critical — merge is BLOCKED.**`;
               if (high.length) body += ` ${high.length} high also found.`;
-              body += `
-
-`;
+              body += `\n\n`;
             } else if (high.length) {
-              body += `> ⚠️ **${high.length} high severity issue(s) found.** No critical — merge is not blocked.
-
-`;
+              body += `> ⚠️ **${high.length} high severity issue(s) found.** No critical — merge is not blocked.\n\n`;
             } else {
-              body += `> ✅ No critical or high severity issues.
-
-`;
+              body += `> ✅ No critical or high severity issues.\n\n`;
             }
 
             if (visibleFindings.length > 0) {
-              body += `| Severity | Rule | File | Line | Description | Link |
-`;
-              body += `|---|---|---|---|---|---|
-`;
+              body += `| Severity | Rule | File | Line | Description | Link |\n`;
+              body += `|---|---|---|---|---|---|\n`;
               for (const f of visibleFindings) {
-                body += `| ${badge(f.sev)} | \`${f.ruleId}\` | \`${f.filePath}\` | ${f.line} | ${f.desc} | [→](${f.url}) |
-`;
+                body += `| ${badge(f.sev)} | \`${f.ruleId}\` | \`${f.filePath}\` | ${f.line} | ${f.desc} | [→](${f.url}) |\n`;
               }
             } else {
-              body += `_No critical or high findings._
-`;
+              body += `_No critical or high findings._\n`;
             }
 
-            body += `
----
-_CodeQL · \`${branch}\` · ${new Date().toUTCString()}_`;
+            body += `\n---\n_CodeQL · \`${branch}\` · ${new Date().toUTCString()}_`;
 
             // ── 4a. Post / update PR comment ──────────────────────────────────
             if (context.eventName === 'pull_request') {
               const prNumber = context.payload.pull_request.number;
               const marker   = '<!-- codeql-findings -->';
-              const fullBody = `${marker}
-${body}`;
+              const fullBody = `${marker}\n${body}`;
 
               const { data: comments } = await github.rest.issues.listComments({
                 owner:        context.repo.owner,
@@ -227,8 +212,7 @@ ${body}`;
             if (context.eventName === 'push' && visibleFindings.length > 0) {
               const issueMarker = `<!-- codeql-${context.sha} -->`;
               const issueTitle  = `🔐 CodeQL findings on \`${branch}\` — ${new Date().toLocaleDateString('en-CA')}`;
-              const issueBody   = `${issueMarker}
-${body}`;
+              const issueBody   = `${issueMarker}\n${body}`;
 
               const { data: existingIssues } = await github.rest.issues.listForRepo({
                 owner:    context.repo.owner,
