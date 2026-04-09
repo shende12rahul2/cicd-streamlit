@@ -1,73 +1,121 @@
-# Pre-commit hooks configuration
-# Install:  pre-commit install
-# Run all:  pre-commit run --all-files
+# .pre-commit-config.yaml
+#
+# SETUP (one-time per developer):
+#   pip install pre-commit
+#   pre-commit install
+#
+# Run manually:
+#   pre-commit run --all-files
+#
+# Update hook versions:
+#   pre-commit autoupdate
+
+default_install_hook_type: [pre-commit]
+
+# Global excludes — these paths are skipped by ALL hooks
+exclude: |
+  (?x)^(
+    migrations/|
+    venv/|
+    \.venv/|
+    .*auto_genrated/.*
+  )$
 
 repos:
-  # ── General file hygiene ────────────────────────────────────────
+  # ── General file hygiene ────────────────────────────────────────────────────
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
       - id: trailing-whitespace
-        name: Trim trailing whitespace
-      - id: end-of-file-fixer
-        name: Fix end-of-file
-      - id: check-yaml
-        name: Validate YAML
-      - id: check-toml
-        name: Validate TOML
-      - id: check-added-large-files
-        name: Check for large files
-        args: ["--maxkb=500"]
-      - id: check-merge-conflict
-        name: Check for merge conflicts
+        exclude: |
+          (?x)^(
+            \.sql$|
+            \.csv$|
+            \.json$
+          )
 
-  # ── Code formatting (Black) ────────────────────────────────────
+      - id: end-of-file-fixer
+        exclude: |
+          (?x)^(
+            \.sql$|
+            \.bat$|
+            \.csv$
+          )
+
+      - id: check-merge-conflict
+
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+        exclude: |
+          (?x)^(
+            \.sql$|
+            \.bat$|
+            \.csv$
+          )
+
+      - id: check-yaml
+        exclude: |
+          (?x)^(
+            \.secrets\.baseline$|
+            venv/|
+            \.venv/
+          )
+        args: ["--unsafe"]   # allow custom YAML tags
+
+      - id: check-json
+        exclude: |
+          (?x)^(
+            .*\.vscode/.*|
+            venv/|
+            \.venv/
+          )
+
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+
+      - id: detect-private-key
+
+      - id: no-commit-to-branch
+        args: ["--branch", "main", "--branch", "production", "--branch", "uat"]
+
+  # ── Python formatting ───────────────────────────────────────────────────────
   - repo: https://github.com/psf/black
-    rev: 24.3.0
+    rev: 24.4.2
     hooks:
       - id: black
-        name: Black formatter
+        files: \.py$
+        args: ["--line-length=100"]
 
-  # ── Import sorting (isort) ─────────────────────────────────────
-  - repo: https://github.com/pycqa/isort
+  # ── Python linting ──────────────────────────────────────────────────────────
+  - repo: https://github.com/PyCQA/flake8
+    rev: 7.0.0
+    hooks:
+      - id: flake8
+        files: \.py$
+        args:
+          - "--max-line-length=100"
+          - "--ignore=E203,W503"
+        additional_dependencies:
+          - flake8-bugbear
+
+  # ── Import sorting ──────────────────────────────────────────────────────────
+  - repo: https://github.com/PyCQA/isort
     rev: 5.13.2
     hooks:
       - id: isort
-        name: isort (import sorting)
-        args: ["--profile", "black"]
+        files: \.py$
+        args: ["--profile=black"]
 
-  # ── Linting (Ruff) ─────────────────────────────────────────────
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.3.4
+  # ── Secret scanning ─────────────────────────────────────────────────────────
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
     hooks:
-      - id: ruff
-        name: Ruff linter
-        args: ["--fix"]
+      - id: gitleaks
 
-  # ── Security (Bandit) ──────────────────────────────────────────
-  - repo: https://github.com/PyCQA/bandit
-    rev: 1.7.8
+  # ── Dependency scan ─────────────────────────────────────────────────────────
+  - repo: https://github.com/pypa/pip-audit
+    rev: v2.7.3
     hooks:
-      - id: bandit
-        name: Bandit security check
-        args: ["-c", "pyproject.toml"]
-        additional_dependencies: ["bandit[toml]"]
-
-  # ── Secret detection ───────────────────────────────────────────
-  - repo: https://github.com/Yelp/detect-secrets
-    rev: v1.4.0
-    hooks:
-      - id: detect-secrets
-        name: Detect secrets
-        args: ["--baseline", ".secrets.baseline"]
-
-  # ── Type checking (mypy) ───────────────────────────────────────
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.9.0
-    hooks:
-      - id: mypy
-        name: mypy type checker
-        additional_dependencies: ["pandas-stubs", "types-PyYAML"]
-        args: ["--config-file=pyproject.toml"]
-        pass_filenames: false
-        entry: mypy src/
+      - id: pip-audit
+        name: pip audit dependencies
+        files: (^|/)(requirements\.txt|pyproject\.toml)$
