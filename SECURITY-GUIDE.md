@@ -27,7 +27,7 @@ command injection, path traversal, XSS, and hardcoded credentials.
 **In a Pull Request:**
 
 When you open a PR to `dev` or `main`, the `Security Gate / Block Critical` job
-posts a comment directly on the PR listing all **critical** and **high** findings.
+posts a comment directly on the PR listing all **critical** findings (High, Medium, and Low are tracked silently in the Security Tab).
 
 ```
 PR → bottom of page → CodeQL Security Findings comment
@@ -37,7 +37,7 @@ The comment shows:
 
 | Column | What it means |
 |---|---|
-| Severity | 🚨 CRITICAL or ⚠️ HIGH |
+| Severity | 🚨 CRITICAL |
 | Rule | The CodeQL rule ID e.g. `js/sql-injection` |
 | File | The file and line number with the issue |
 | Description | Short explanation of the vulnerability |
@@ -263,9 +263,7 @@ Security Gate job runs after scan completes
 
 If any of these are red, the PR cannot be merged regardless of approvals.
 
-**High severity findings** — do not block merge but appear as warnings in the
-PR comment and as annotations in the workflow run. They must be reviewed and
-resolved in a follow-up if not fixed before merge.
+**High/Medium/Low severity findings** — do not block the merge and are explicitly excluded from the PR comment. They appear as annotations in the workflow run and are tracked centrally in the repository's Security tab. They must be reviewed and resolved in a follow-up if not fixed before merge.
 
 ### 4.1 Troubleshooting: "Merging is blocked" Errors
 
