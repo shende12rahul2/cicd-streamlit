@@ -1,9 +1,11 @@
 import hashlib
+import os
 import random
 import sqlite3
+import ssl
 import tempfile
 
-from flask import Flask, request
+from flask import Flask, redirect, request
 
 app = Flask(__name__)
 
@@ -48,6 +50,43 @@ def hash_data():
     # Rule: py/insecure-temporary-file
     tmp_file = tempfile.mktemp()  # noqa: F841
     return md5_hash
+
+
+# ── SECOND ROUND OF VULNERABILITIES ────────────────────────────────────
+
+
+# CRITICAL: Command Injection
+@app.route("/ping")
+def ping():
+    host = request.args.get("host")
+    # Rule: py/command-line-injection
+    os.system(f"ping -c 1 {host}")  # noqa: S605
+    return "Ping executed"
+
+
+# HIGH: Path Traversal
+@app.route("/read")
+def read_file():
+    filename = request.args.get("file")
+    # Rule: py/path-injection
+    with open(f"/var/www/uploads/{filename}", "r") as f:
+        return f.read()
+
+
+# MEDIUM: Open Redirect
+@app.route("/redirect")
+def do_redirect():
+    url = request.args.get("url")
+    # Rule: py/url-redirection
+    return redirect(url)
+
+
+# LOW: Insecure SSL Certificate Validation
+@app.route("/ssl")
+def bad_ssl():
+    # Rule: py/insecure-certificate-validation
+    context = ssl._create_unverified_context()
+    return str(context)
 
 
 if __name__ == "__main__":

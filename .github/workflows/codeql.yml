@@ -175,37 +175,29 @@ jobs:
               else                         low.push(item);
             }
 
-            // ── 3. Build comment — all findings ───────────────────────
+            // ── 3. Build comment — critical only ───────────────────────
             function badge(sev) {
-              if (sev === 'critical') return '🚨 **CRITICAL**';
-              if (sev === 'high') return '⚠️ **HIGH**';
-              if (sev === 'medium') return '🔵 **MEDIUM**';
-              return '⚪ **LOW**';
+              return '🚨 **CRITICAL**';
             }
 
-            const visibleFindings = [...critical, ...high, ...medium, ...low];
+            const visibleFindings = [...critical];
             const branch = context.ref?.replace('refs/heads/', '') ?? context.ref;
             let body = `## 🔐 CodeQL Security Findings\n\n`;
 
             if (critical.length) {
-              body += `> ❌ **${critical.length} critical — merge is BLOCKED.**`;
-              const others = high.length + medium.length + low.length;
-              if (others) body += ` ${others} other issue(s) also found.`;
-              body += `\n\n`;
-            } else if (visibleFindings.length) {
-              body += `> ⚠️ **${visibleFindings.length} issue(s) found.** No critical — merge is not blocked.\n\n`;
+              body += `> ❌ **${critical.length} critical finding(s) — merge is BLOCKED.**\n\n`;
             } else {
-              body += `> ✅ No security issues found.\n\n`;
+              body += `> ✅ No critical security issues found! Merge is unblocked.\n\n`;
             }
 
-            if (visibleFindings.length > 0) {
+            if (critical.length > 0) {
               body += `| Severity | Rule | File | Line | Description | Link |\n`;
               body += `|---|---|---|---|---|---|\n`;
-              for (const f of visibleFindings) {
+              for (const f of critical) {
                 body += `| ${badge(f.sev)} | \`${f.ruleId}\` | \`${f.filePath}\` | ${f.line} | ${f.desc} | [→](${f.url}) |\n`;
               }
             } else {
-              body += `_No findings._\n`;
+              body += `_High, Medium, and Low severity alerts are ignored here and will be tracked exclusively in the Security Tab._\n`;
             }
 
             body += `\n---\n_CodeQL · \`${branch}\` · ${new Date().toUTCString()}_`;
