@@ -26,9 +26,7 @@ def validate_file_extension(filename: str) -> tuple[bool, str]:
     if not filename:
         return False, "No file name provided."
 
-    extension = (
-        "." + filename.rsplit(".", maxsplit=1)[-1].lower() if "." in filename else ""
-    )
+    extension = "." + filename.rsplit(".", maxsplit=1)[-1].lower() if "." in filename else ""
     if extension not in ALLOWED_EXTENSIONS:
         return False, (
             f"Invalid file type '{extension}'. "
@@ -51,9 +49,7 @@ def validate_file_size(size_bytes: int) -> tuple[bool, str]:
 
     size_mb = size_bytes / (1024 * 1024)
     if size_mb > MAX_FILE_SIZE_MB:
-        return False, (
-            f"File size ({size_mb:.1f} MB) exceeds the " f"{MAX_FILE_SIZE_MB} MB limit."
-        )
+        return False, (f"File size ({size_mb:.1f} MB) exceeds the " f"{MAX_FILE_SIZE_MB} MB limit.")
     return True, f"File size ({size_mb:.2f} MB) is within the limit."
 
 
@@ -94,7 +90,5 @@ def validate_search_term(term: str) -> tuple[bool, str]:
     if not term or not term.strip():
         return False, "Search term cannot be empty."
     if len(term) > MAX_SEARCH_TERM_LENGTH:
-        return False, (
-            f"Search term is too long (max {MAX_SEARCH_TERM_LENGTH} characters)."
-        )
+        return False, (f"Search term is too long (max {MAX_SEARCH_TERM_LENGTH} characters).")
     return True, "Search term is valid."
