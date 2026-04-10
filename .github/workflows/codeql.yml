@@ -47,7 +47,6 @@ permissions:
   security-events: write   # upload SARIF results + read alerts
   pull-requests: write     # post PR comments
   issues: write            # open tracking issues on push
-  actions: read            # required for workflow-run API on self-hosted runners
 
 jobs:
   # ─────────────────────────────────────────────
