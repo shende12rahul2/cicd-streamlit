@@ -175,13 +175,15 @@ jobs:
               else                         low.push(item);
             }
 
-            // ── 3. Build comment — critical and low ───────────────────────
+            // ── 3. Build comment — all findings ───────────────────────
             function badge(sev) {
               if (sev === 'critical') return '🚨 **CRITICAL**';
+              if (sev === 'high') return '⚠️ **HIGH**';
+              if (sev === 'medium') return '🔵 **MEDIUM**';
               return '⚪ **LOW**';
             }
 
-            const visibleFindings = [...critical, ...low];
+            const visibleFindings = [...critical, ...high, ...medium, ...low];
             const branch = context.ref?.replace('refs/heads/', '') ?? context.ref;
             let body = `## 🔐 CodeQL Security Findings\n\n`;
 
@@ -198,7 +200,7 @@ jobs:
                 body += `| ${badge(f.sev)} | \`${f.ruleId}\` | \`${f.filePath}\` | ${f.line} | ${f.desc} | [→](${f.url}) |\n`;
               }
             } else {
-              body += `_High and Medium severity alerts are ignored here and will be tracked exclusively in the Security Tab._\n`;
+              body += `_No findings._\n`;
             }
 
             body += `\n---\n_CodeQL · \`${branch}\` · ${new Date().toUTCString()}_`;
