@@ -175,12 +175,13 @@ jobs:
               else                         low.push(item);
             }
 
-            // ── 3. Build comment — critical only ───────────────────────
+            // ── 3. Build comment — critical and low ───────────────────────
             function badge(sev) {
-              return '🚨 **CRITICAL**';
+              if (sev === 'critical') return '🚨 **CRITICAL**';
+              return '⚪ **LOW**';
             }
 
-            const visibleFindings = [...critical];
+            const visibleFindings = [...critical, ...low];
             const branch = context.ref?.replace('refs/heads/', '') ?? context.ref;
             let body = `## 🔐 CodeQL Security Findings\n\n`;
 
@@ -190,14 +191,14 @@ jobs:
               body += `> ✅ No critical security issues found! Merge is unblocked.\n\n`;
             }
 
-            if (critical.length > 0) {
+            if (visibleFindings.length > 0) {
               body += `| Severity | Rule | File | Line | Description | Link |\n`;
               body += `|---|---|---|---|---|---|\n`;
-              for (const f of critical) {
+              for (const f of visibleFindings) {
                 body += `| ${badge(f.sev)} | \`${f.ruleId}\` | \`${f.filePath}\` | ${f.line} | ${f.desc} | [→](${f.url}) |\n`;
               }
             } else {
-              body += `_High, Medium, and Low severity alerts are ignored here and will be tracked exclusively in the Security Tab._\n`;
+              body += `_High and Medium severity alerts are ignored here and will be tracked exclusively in the Security Tab._\n`;
             }
 
             body += `\n---\n_CodeQL · \`${branch}\` · ${new Date().toUTCString()}_`;
