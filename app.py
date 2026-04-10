@@ -1,48 +1,45 @@
 import os
-import pickle
 import sqlite3
 
-from flask import Flask, request
+from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
+# ✅ Use environment variable for secrets
+SECRET_KEY = os.environ.get("SECRET_KEY", "default-safe-key")
 
-# 🚨 SQL Injection vulnerability
+
+# ✅ SQL Injection FIX (parameterized query)
 @app.route("/user")
 def get_user():
     user_id = request.args.get("id")
+
     conn = sqlite3.connect("users.db")
     cursor = conn.cursor()
 
-    # Dangerous query (no sanitization)
-    query = f"SELECT * FROM users WHERE id = {user_id}"
-    cursor.execute(query)
+    query = "SELECT * FROM users WHERE id = ?"
+    cursor.execute(query, (user_id,))
 
-    return str(cursor.fetchall())
+    return jsonify(cursor.fetchall())
 
 
-# 🚨 Command Injection vulnerability
+# ✅ Command Injection FIX (input validation)
 @app.route("/ping")
 def ping():
     host = request.args.get("host")
 
-    # Dangerous OS command execution
+    if not host or not host.replace(".", "").isalnum():
+        return "Invalid host", 400
+
     result = os.popen(f"ping -c 1 {host}").read()
     return result
 
 
-# 🚨 Hardcoded secret
-SECRET_KEY = "super-secret-password"
-
-# 🚨 Insecure deserialization
-
-
+# ✅ Remove insecure deserialization
 @app.route("/load", methods=["POST"])
 def load_data():
-    data = request.data
-    obj = pickle.loads(data)  # ⚠️ RCE risk
-    return str(obj)
+    return "Deserialization disabled for security", 403
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=False)

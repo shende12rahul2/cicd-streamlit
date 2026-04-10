@@ -1,36 +1,42 @@
 const express = require('express');
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const app = express();
 
 app.use(express.json());
 
-// 🚨 Command Injection
+// ✅ Use env variable
+const API_KEY = process.env.API_KEY || "safe-default";
+
+// ✅ Command Injection FIX
 app.get('/ping', (req, res) => {
     const host = req.query.host;
 
-    exec(`ping -c 1 ${host}`, (err, stdout, stderr) => {
+    if (!host || !/^[a-zA-Z0-9.]+$/.test(host)) {
+        return res.status(400).send("Invalid host");
+    }
+
+    execFile('ping', ['-c', '1', host], (err, stdout) => {
         res.send(stdout);
     });
 });
 
-// 🚨 SQL Injection (simulated)
+// ✅ SQL Injection FIX (example with placeholder)
 app.get('/user', (req, res) => {
     const id = req.query.id;
 
-    const query = "SELECT * FROM users WHERE id = " + id;
-    console.log("Executing query:", query);
+    if (!id || isNaN(id)) {
+        return res.status(400).send("Invalid ID");
+    }
+
+    const query = "SELECT * FROM users WHERE id = ?";
+    console.log("Safe query:", query, id);
 
     res.send("User data");
 });
 
-
-
-// 🚨 eval usage (RCE risk)
+// ✅ Remove eval
 app.post('/run', (req, res) => {
-    const code = req.body.code;
-
-    const result = eval(code);  // ⚠️ Very dangerous
-    res.send(result.toString());
+    return res.status(403).send("Code execution disabled");
 });
 
 app.listen(3000, () => {
