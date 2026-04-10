@@ -16,12 +16,12 @@ on:
     branches:
       - dev
       - uat
-      - production
+      - main
   push:
     branches:
       - dev
       - main
-      - production
+      - uat
   schedule:
     - cron: "0 2 * * 1"
 
