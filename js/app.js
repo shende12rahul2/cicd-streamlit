@@ -1,16 +1,44 @@
-// Simple JavaScript example
+const express = require('express');
+const { execFile } = require('child_process');
+const app = express();
 
-function greet(name) {
-    return `Hello, ${name}! Welcome to the project 🚀`;
-}
+app.use(express.json());
 
-// Test the function
-const user = "Rahul";
-console.log(greet(user));
+// ✅ Use env variable
+const API_KEY = process.env.API_KEY || "safe-default";
 
-// Simple addition function
-function add(a, b) {
-    return a + b;
-}
+// ✅ Command Injection FIX
+app.get('/ping', (req, res) => {
+    const host = req.query.host;
 
-console.log("Sum:", add(5, 3));
+    if (!host || !/^[a-zA-Z0-9.]+$/.test(host)) {
+        return res.status(400).send("Invalid host");
+    }
+
+    execFile('ping', ['-c', '1', host], (err, stdout) => {
+        res.send(stdout);
+    });
+});
+
+// ✅ SQL Injection FIX (example with placeholder)
+app.get('/user', (req, res) => {
+    const id = req.query.id;
+
+    if (!id || isNaN(id)) {
+        return res.status(400).send("Invalid ID");
+    }
+
+    const query = "SELECT * FROM users WHERE id = ?";
+    console.log("Safe query:", query, id);
+
+    res.send("User data");
+});
+
+// ✅ Remove eval
+app.post('/run', (req, res) => {
+    return res.status(403).send("Code execution disabled");
+});
+
+app.listen(3000, () => {
+    console.log("Server running on port 3000");
+});
