@@ -46,7 +46,7 @@ jobs:
         env:
           GHAS_PAT: ${{ secrets.GHAS_REPORT_TOKEN }}
         with:
-          github-token: ${{ secrets.GHAS_REPORT_TOKEN }}
+          github-token: ${{ github.token }}
           script: |
             const DAYS_BACK  = parseInt('${{ github.event.inputs.days }}' || '30');
             const SINCE_DATE = new Date(Date.now() - DAYS_BACK * 86400000).toISOString();
