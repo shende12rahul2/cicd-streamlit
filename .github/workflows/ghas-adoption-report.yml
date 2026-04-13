@@ -44,7 +44,7 @@ jobs:
       - name: Generate GHAS metrics
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.GHAS_REPORT_TOKEN }}
           script: |
             const DAYS_BACK  = parseInt('${{ github.event.inputs.days }}' || '30');
             const SINCE_DATE = new Date(Date.now() - DAYS_BACK * 86400000).toISOString();
