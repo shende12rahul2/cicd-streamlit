@@ -1,28 +1,20 @@
 # .github/workflows/ghas-adoption-report.yml
 #
-# Generates a weekly GHAS metrics report covering:
-#   - CodeQL code scanning alerts (critical/high/medium/low + error/warning/note)
-#   - Dependabot vulnerability alerts (by severity and ecosystem)
-#   - Secret scanning alerts (by secret type, validity, and state)
-#   - MTTR (mean time to resolve) per category
+# Generates a weekly GHAS report with:
+#   - CodeQL code scanning alerts (by severity + detail list)
+#   - Dependabot vulnerability alerts (by severity + detail list)
+#   - Secret scanning alerts (by type/validity + detail list)
 #
-# Runs:
-#   - Every Monday at 08:30 UTC (after pre-commit report at 08:00)
-#   - Can be triggered manually from Actions tab
+# Runs: Every Monday 08:30 UTC — or manually from Actions tab
+# Posts: GitHub Issue tagged ghas-report + Workflow summary
 #
-# Posts results as:
-#   - A GitHub Issue tagged: ghas-report
-#   - Workflow run summary in Actions tab
-#
-# Requires:
-#   - GHAS_REPORT_TOKEN secret: a PAT with security_events + repo scopes
-#     (needed for Dependabot + Secret Scanning REST APIs)
+# Requires: GHAS_REPORT_TOKEN secret (PAT with security_events + repo scopes)
 
 name: GHAS Adoption Report
 
 on:
   schedule:
-    - cron: "30 8 * * 1"   # Every Monday 08:30 UTC
+    - cron: "30 8 * * 1"
   workflow_dispatch:
     inputs:
       days:
@@ -32,8 +24,8 @@ on:
 
 permissions:
   contents: read
-  security-events: read    # read CodeQL alerts
-  issues: write            # create/update report issue
+  security-events: read
+  issues: write
   pull-requests: read
 
 jobs:
@@ -50,67 +42,43 @@ jobs:
         with:
           github-token: ${{ github.token }}
           script: |
-            const DAYS_BACK  = parseInt('${{ github.event.inputs.days }}' || '30');
-            const SINCE_DATE = new Date(Date.now() - DAYS_BACK * 86400000).toISOString();
-
-            core.info(`Generating GHAS report for last ${DAYS_BACK} days since ${SINCE_DATE}`);
-
-            // ── Helpers ────────────────────────────────────────────────────────
-            function daysBetween(d1, d2) {
-              return Math.round(Math.abs(new Date(d1) - new Date(d2)) / 86400000);
-            }
+            const DAYS_BACK = parseInt('${{ github.event.inputs.days }}' || '30');
+            core.info(`Generating GHAS report — last ${DAYS_BACK} days`);
 
             function severityBadge(sev) {
               if (!sev) return '⚪ Unknown';
               const s = sev.toLowerCase();
-              if (s === 'critical')              return '🚨 Critical';
-              if (s === 'high')                  return '🔴 High';
+              if (s === 'critical')                   return '🚨 Critical';
+              if (s === 'high')                       return '🔴 High';
               if (s === 'medium' || s === 'moderate') return '🟡 Medium';
-              if (s === 'low')                   return '🟢 Low';
-              if (s === 'error')                 return '❌ Error';
-              if (s === 'warning')               return '⚠️ Warning';
-              if (s === 'note')                  return '📝 Note';
+              if (s === 'low')                        return '🟢 Low';
+              if (s === 'error')                      return '❌ Error';
+              if (s === 'warning')                    return '⚠️ Warning';
+              if (s === 'note')                       return '📝 Note';
               return `⚪ ${sev}`;
             }
 
-            // ── PAT client for Dependabot + Secret Scanning ───────────────────
             const ghasPat   = process.env.GHAS_PAT;
             const patClient = ghasPat ? github.getOctokit(ghasPat) : null;
+            const owner     = context.repo.owner;
+            const repo      = context.repo.repo;
 
             // ══════════════════════════════════════════════════════════════════
-            // SECTION 1 — CodeQL Code Scanning Alerts
+            // SECTION 1 — CodeQL Code Scanning (open alerts only)
             // ══════════════════════════════════════════════════════════════════
             core.info('Fetching CodeQL alerts...');
 
             let codeqlAlerts = [];
             try {
               const { data } = await github.rest.codeScanning.listAlertsForRepo({
-                owner:    context.repo.owner,
-                repo:     context.repo.repo,
-                state:    'open',
-                per_page: 100,
+                owner, repo, state: 'open', per_page: 100,
               });
               codeqlAlerts = data;
             } catch (e) {
               core.warning(`Could not fetch CodeQL alerts: ${e.message}`);
             }
 
-            let codeqlResolved = [];
-            try {
-              const { data } = await github.rest.codeScanning.listAlertsForRepo({
-                owner:    context.repo.owner,
-                repo:     context.repo.repo,
-                state:    'dismissed',
-                per_page: 100,
-              });
-              codeqlResolved = data.filter(a =>
-                a.dismissed_at && new Date(a.dismissed_at) >= new Date(SINCE_DATE)
-              );
-            } catch (e) {
-              core.warning(`Could not fetch dismissed CodeQL alerts: ${e.message}`);
-            }
-
-            // Bucket open alerts by severity (security_severity_level takes priority)
+            // Bucket by severity — security_severity_level takes priority over severity
             const codeqlBySev = { critical: [], high: [], medium: [], low: [], error: [], warning: [], note: [], unknown: [] };
             for (const alert of codeqlAlerts) {
               let sev = alert.rule?.security_severity_level?.toLowerCase();
@@ -119,68 +87,26 @@ jobs:
               (codeqlBySev[sev] ?? codeqlBySev.unknown).push(alert);
             }
 
-            // Per-rule breakdown (falls back to general severity for non-security rules)
-            const codeqlByRule = {};
-            for (const alert of codeqlAlerts) {
-              const rule = alert.rule?.id ?? 'unknown';
-              const sev  = alert.rule?.security_severity_level ?? alert.rule?.severity ?? 'unknown';
-              if (!codeqlByRule[rule]) codeqlByRule[rule] = { count: 0, sev };
-              codeqlByRule[rule].count++;
-            }
-
-            // MTTR for resolved CodeQL alerts
-            let codeqlMttrDays = null;
-            if (codeqlResolved.length > 0) {
-              const totalDays = codeqlResolved.reduce((sum, a) =>
-                sum + daysBetween(a.created_at, a.dismissed_at), 0
-              );
-              codeqlMttrDays = Math.round(totalDays / codeqlResolved.length);
-            }
-
-            // New alerts opened in the period
-            const codeqlNew = codeqlAlerts.filter(a =>
-              new Date(a.created_at) >= new Date(SINCE_DATE)
-            );
-
             // ══════════════════════════════════════════════════════════════════
-            // SECTION 2 — Dependabot Alerts
+            // SECTION 2 — Dependabot (open alerts only)
             // ══════════════════════════════════════════════════════════════════
             core.info('Fetching Dependabot alerts...');
 
             let dependabotOpen = [];
-            let dependabotFixed = [];
-
             if (!patClient) {
-              core.warning('GHAS_REPORT_TOKEN not set — skipping Dependabot alerts');
+              core.warning('GHAS_REPORT_TOKEN not set — skipping Dependabot');
             } else {
               try {
                 const { data } = await patClient.rest.dependabot.listAlertsForRepo({
-                  owner:    context.repo.owner,
-                  repo:     context.repo.repo,
-                  state:    'open',
-                  per_page: 100,
+                  owner, repo, state: 'open', per_page: 100,
                 });
                 dependabotOpen = data;
               } catch (e) {
-                core.warning(`Could not fetch Dependabot open alerts: ${e.message}`);
-              }
-
-              try {
-                const { data } = await patClient.rest.dependabot.listAlertsForRepo({
-                  owner:    context.repo.owner,
-                  repo:     context.repo.repo,
-                  state:    'fixed',
-                  per_page: 100,
-                });
-                dependabotFixed = data.filter(a =>
-                  a.fixed_at && new Date(a.fixed_at) >= new Date(SINCE_DATE)
-                );
-              } catch (e) {
-                core.warning(`Could not fetch Dependabot fixed alerts: ${e.message}`);
+                core.warning(`Could not fetch Dependabot alerts: ${e.message}`);
               }
             }
 
-            // Bucket by severity — map Dependabot's "moderate" → "medium"
+            // Bucket by severity — map Dependabot "moderate" → "medium"
             const depBySev = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
             for (const alert of dependabotOpen) {
               const raw = alert.security_advisory?.severity?.toLowerCase() ?? 'unknown';
@@ -188,163 +114,74 @@ jobs:
               depBySev[sev] = (depBySev[sev] ?? 0) + 1;
             }
 
-            // Bucket by ecosystem
-            const depByEco = {};
-            for (const alert of dependabotOpen) {
-              const eco = alert.dependency?.package?.ecosystem ?? 'unknown';
-              depByEco[eco] = (depByEco[eco] ?? 0) + 1;
-            }
-
-            // Top vulnerable packages (keep raw sev for display — severityBadge handles moderate)
-            const depByPkg = {};
-            for (const alert of dependabotOpen) {
-              const pkg = alert.dependency?.package?.name ?? 'unknown';
-              if (!depByPkg[pkg]) depByPkg[pkg] = { count: 0, sev: alert.security_advisory?.severity ?? 'unknown' };
-              depByPkg[pkg].count++;
-            }
-
-            // New Dependabot alerts opened in the period
-            const dependabotNew = dependabotOpen.filter(a =>
-              new Date(a.created_at) >= new Date(SINCE_DATE)
-            );
-
-            // MTTR
-            let depMttrDays = null;
-            if (dependabotFixed.length > 0) {
-              const totalDays = dependabotFixed.reduce((sum, a) =>
-                sum + daysBetween(a.created_at, a.fixed_at), 0
-              );
-              depMttrDays = Math.round(totalDays / dependabotFixed.length);
-            }
-
             // ══════════════════════════════════════════════════════════════════
-            // SECTION 3 — Secret Scanning Alerts
+            // SECTION 3 — Secret Scanning (open alerts only)
             // ══════════════════════════════════════════════════════════════════
-            core.info('Fetching secret scanning alerts...');
+            core.info('Fetching Secret Scanning alerts...');
 
             let secretsOpen = [];
-            let secretsResolved = [];
-
             if (!patClient) {
-              core.warning('GHAS_REPORT_TOKEN not set — skipping Secret Scanning alerts');
+              core.warning('GHAS_REPORT_TOKEN not set — skipping Secret Scanning');
             } else {
               try {
                 const { data } = await patClient.rest.secretScanning.listAlertsForRepo({
-                  owner:    context.repo.owner,
-                  repo:     context.repo.repo,
-                  state:    'open',
-                  per_page: 100,
+                  owner, repo, state: 'open', per_page: 100,
                 });
                 secretsOpen = data;
               } catch (e) {
-                core.warning(`Could not fetch secret scanning alerts: ${e.message}`);
-              }
-
-              try {
-                const { data } = await patClient.rest.secretScanning.listAlertsForRepo({
-                  owner:    context.repo.owner,
-                  repo:     context.repo.repo,
-                  state:    'resolved',
-                  per_page: 100,
-                });
-                secretsResolved = data.filter(a =>
-                  a.resolved_at && new Date(a.resolved_at) >= new Date(SINCE_DATE)
-                );
-              } catch (e) {
-                core.warning(`Could not fetch resolved secret alerts: ${e.message}`);
+                core.warning(`Could not fetch Secret Scanning alerts: ${e.message}`);
               }
             }
 
-            // Bucket by secret type and validity
             const secretByType     = {};
             const secretByValidity = {};
             for (const alert of secretsOpen) {
               const type = alert.secret_type_display_name ?? alert.secret_type ?? 'unknown';
-              secretByType[type] = (secretByType[type] ?? 0) + 1;
-
+              secretByType[type]                           = (secretByType[type] ?? 0) + 1;
               const val = alert.validity ?? 'unknown';
-              secretByValidity[val] = (secretByValidity[val] ?? 0) + 1;
+              secretByValidity[val]                        = (secretByValidity[val] ?? 0) + 1;
             }
-
-            // New secrets opened in the period
-            const secretsNew = secretsOpen.filter(a =>
-              new Date(a.created_at) >= new Date(SINCE_DATE)
-            );
-
-            // Count only actually-active (still valid) secrets for urgent priority
-            const activeSecrets = secretsOpen.filter(a =>
-              (a.validity ?? 'unknown') === 'active'
-            ).length;
-
-            // MTTR
-            let secretMttrDays = null;
-            if (secretsResolved.length > 0) {
-              const totalDays = secretsResolved.reduce((sum, a) =>
-                sum + daysBetween(a.created_at, a.resolved_at), 0
-              );
-              secretMttrDays = Math.round(totalDays / secretsResolved.length);
-            }
+            const activeSecrets = secretsOpen.filter(a => (a.validity ?? '') === 'active').length;
 
             // ══════════════════════════════════════════════════════════════════
             // BUILD REPORT
             // ══════════════════════════════════════════════════════════════════
             const reportDate = new Date().toLocaleDateString('en-CA');
             let report = `## 🛡️ GHAS Security Report — ${reportDate}\n\n`;
-            report += `**Period:** Last ${DAYS_BACK} days · **Repo:** ${context.repo.owner}/${context.repo.repo} · **Generated:** ${new Date().toUTCString()}\n\n`;
+            report += `**Repo:** ${owner}/${repo} · **Generated:** ${new Date().toUTCString()}\n\n`;
 
-            // ── Overall health banner ─────────────────────────────────────────
-            const totalOpen     = codeqlAlerts.length + dependabotOpen.length + secretsOpen.length;
-            const totalCritical = codeqlBySev.critical.length + depBySev.critical + activeSecrets;
-            const totalResolved = codeqlResolved.length + dependabotFixed.length + secretsResolved.length;
-            const totalNew      = codeqlNew.length + dependabotNew.length + secretsNew.length;
-
-            report += `### 📈 Overall Health\n\n`;
-            report += `| Metric | Value |\n|---|---|\n`;
-            report += `| Total open alerts | **${totalOpen}** |\n`;
-            report += `| 🚨 Critical (CodeQL+Dep) / Active secrets | **${totalCritical}** |\n`;
-            report += `| ✅ Resolved in period | ${totalResolved} |\n`;
-            report += `| New alerts in period | ${totalNew} |\n\n`;
+            // ── Overall summary ───────────────────────────────────────────────
+            const totalOpen = codeqlAlerts.length + dependabotOpen.length + secretsOpen.length;
+            report += `### 📈 Summary\n\n`;
+            report += `| Scanner | Open Alerts |\n|---|---|\n`;
+            report += `| 🔍 CodeQL        | **${codeqlAlerts.length}** |\n`;
+            report += `| 📦 Dependabot    | **${dependabotOpen.length}** |\n`;
+            report += `| 🔑 Secret Scanning | **${secretsOpen.length}** |\n`;
+            report += `| **Total**        | **${totalOpen}** |\n\n`;
 
             // ── Section 1: CodeQL ─────────────────────────────────────────────
             report += `---\n### 🔍 CodeQL Code Scanning\n\n`;
-            report += `| Severity | Open | New this period |\n|---|---|---|\n`;
-            report += `| 🚨 Critical | ${codeqlBySev.critical.length} | ${codeqlNew.filter(a => a.rule?.security_severity_level === 'critical').length} |\n`;
-            report += `| 🔴 High     | ${codeqlBySev.high.length}     | ${codeqlNew.filter(a => a.rule?.security_severity_level === 'high').length} |\n`;
-            report += `| 🟡 Medium   | ${codeqlBySev.medium.length}   | ${codeqlNew.filter(a => a.rule?.security_severity_level === 'medium').length} |\n`;
-            report += `| 🟢 Low      | ${codeqlBySev.low.length}      | ${codeqlNew.filter(a => a.rule?.security_severity_level === 'low').length} |\n`;
-            report += `| ❌ Error    | ${codeqlBySev.error.length}    | ${codeqlNew.filter(a => !a.rule?.security_severity_level && a.rule?.severity === 'error').length} |\n`;
-            report += `| ⚠️ Warning  | ${codeqlBySev.warning.length}  | ${codeqlNew.filter(a => !a.rule?.security_severity_level && a.rule?.severity === 'warning').length} |\n`;
-            report += `| 📝 Note     | ${codeqlBySev.note.length}     | ${codeqlNew.filter(a => !a.rule?.security_severity_level && a.rule?.severity === 'note').length} |\n`;
-            report += `| **Total**   | **${codeqlAlerts.length}** | **${codeqlNew.length}** |\n\n`;
+            report += `| Severity | Count |\n|---|---|\n`;
+            report += `| 🚨 Critical | ${codeqlBySev.critical.length} |\n`;
+            report += `| 🔴 High     | ${codeqlBySev.high.length} |\n`;
+            report += `| 🟡 Medium   | ${codeqlBySev.medium.length} |\n`;
+            report += `| 🟢 Low      | ${codeqlBySev.low.length} |\n`;
+            report += `| ❌ Error    | ${codeqlBySev.error.length} |\n`;
+            report += `| ⚠️ Warning  | ${codeqlBySev.warning.length} |\n`;
+            report += `| 📝 Note     | ${codeqlBySev.note.length} |\n`;
+            report += `| **Total**   | **${codeqlAlerts.length}** |\n\n`;
 
-            if (codeqlMttrDays !== null) {
-              report += `**MTTR:** ${codeqlMttrDays} days (based on ${codeqlResolved.length} resolved in period)\n\n`;
-            }
-
-            // Top rules
-            const topRules = Object.entries(codeqlByRule)
-              .sort((a, b) => b[1].count - a[1].count)
-              .slice(0, 5);
-
-            if (topRules.length > 0) {
-              report += `**Top rules by alert count:**\n\n`;
-              report += `| Rule | Severity | Open Alerts |\n|---|---|---|\n`;
-              for (const [rule, data] of topRules) {
-                report += `| \`${rule}\` | ${severityBadge(data.sev)} | ${data.count} |\n`;
-              }
-              report += `\n`;
-            }
-
-            // Open critical/high/error alerts list
-            const urgentCodeql = [...codeqlBySev.critical, ...codeqlBySev.high, ...codeqlBySev.error].slice(0, 10);
-            if (urgentCodeql.length > 0) {
-              report += `**Open critical & high priority alerts:**\n\n`;
-              report += `| # | Severity | Rule | File | Link |\n|---|---|---|---|---|\n`;
-              for (const a of urgentCodeql) {
+            if (codeqlAlerts.length > 0) {
+              report += `**Open alerts:**\n\n`;
+              report += `| # | Severity | Rule | Description | File | Link |\n|---|---|---|---|---|---|\n`;
+              for (const a of codeqlAlerts.slice(0, 25)) {
+                const sev  = a.rule?.security_severity_level || a.rule?.severity || 'unknown';
+                const desc = a.rule?.description ?? a.rule?.id ?? '—';
                 const file = a.most_recent_instance?.location?.path ?? '—';
                 const line = a.most_recent_instance?.location?.start_line ?? '?';
-                report += `| ${a.number} | ${severityBadge(a.rule?.security_severity_level || a.rule?.severity)} | \`${a.rule?.id ?? '—'}\` | \`${file}:${line}\` | [→](${a.html_url}) |\n`;
+                report += `| ${a.number} | ${severityBadge(sev)} | \`${a.rule?.id ?? '—'}\` | ${desc} | \`${file}:${line}\` | [→](${a.html_url}) |\n`;
               }
+              if (codeqlAlerts.length > 25) report += `\n_...and ${codeqlAlerts.length - 25} more. [View all](https://github.com/${owner}/${repo}/security/code-scanning)_\n`;
               report += `\n`;
             }
 
@@ -353,34 +190,24 @@ jobs:
             if (!patClient) {
               report += `> ⚠️ _Skipped: \`GHAS_REPORT_TOKEN\` secret not configured._\n\n`;
             } else {
-              report += `| Severity | Open |\n|---|---|\n`;
+              report += `| Severity | Count |\n|---|---|\n`;
               report += `| 🚨 Critical | ${depBySev.critical} |\n`;
-              report += `| 🔴 High     | ${depBySev.high}     |\n`;
-              report += `| 🟡 Medium   | ${depBySev.medium}   |\n`;
-              report += `| 🟢 Low      | ${depBySev.low}      |\n`;
+              report += `| 🔴 High     | ${depBySev.high} |\n`;
+              report += `| 🟡 Medium   | ${depBySev.medium} |\n`;
+              report += `| 🟢 Low      | ${depBySev.low} |\n`;
               report += `| **Total**   | **${dependabotOpen.length}** |\n\n`;
 
-              if (depMttrDays !== null) {
-                report += `**MTTR:** ${depMttrDays} days (based on ${dependabotFixed.length} fixed in period)\n\n`;
-              }
-
-              if (Object.keys(depByEco).length > 0) {
-                report += `**By ecosystem:**\n\n`;
-                report += `| Ecosystem | Open Alerts |\n|---|---|\n`;
-                for (const [eco, count] of Object.entries(depByEco).sort((a, b) => b[1] - a[1])) {
-                  report += `| ${eco} | ${count} |\n`;
-                }
-                report += `\n`;
-              }
-
-              const topPkgs = Object.entries(depByPkg)
-                .sort((a, b) => b[1].count - a[1].count)
-                .slice(0, 5);
-              if (topPkgs.length > 0) {
-                report += `**Top vulnerable packages:**\n\n`;
-                report += `| Package | Severity | Alert Count |\n|---|---|---|\n`;
-                for (const [pkg, data] of topPkgs) {
-                  report += `| \`${pkg}\` | ${severityBadge(data.sev)} | ${data.count} |\n`;
+              if (dependabotOpen.length > 0) {
+                report += `**Open alerts:**\n\n`;
+                report += `| # | Severity | Package | Advisory | CVE | Link |\n|---|---|---|---|---|---|\n`;
+                for (const a of dependabotOpen) {
+                  const raw    = a.security_advisory?.severity ?? 'unknown';
+                  const sev    = raw.toLowerCase() === 'moderate' ? 'medium' : raw;
+                  const pkg    = a.dependency?.package?.name ?? '—';
+                  const eco    = a.dependency?.package?.ecosystem ?? '';
+                  const title  = a.security_advisory?.summary ?? '—';
+                  const cve    = a.security_advisory?.cve_id ?? a.security_advisory?.ghsa_id ?? '—';
+                  report += `| ${a.number} | ${severityBadge(sev)} | \`${pkg}\` (${eco}) | ${title} | ${cve} | [→](${a.html_url}) |\n`;
                 }
                 report += `\n`;
               }
@@ -391,18 +218,12 @@ jobs:
             if (!patClient) {
               report += `> ⚠️ _Skipped: \`GHAS_REPORT_TOKEN\` secret not configured._\n\n`;
             } else {
-              report += `| Metric | Value |\n|---|---|\n`;
+              report += `| Metric | Count |\n|---|---|\n`;
               report += `| Open alerts | **${secretsOpen.length}** |\n`;
-              report += `| 🔴 Active (still valid) | **${activeSecrets}** |\n`;
-              report += `| New in period | ${secretsNew.length} |\n`;
-              report += `| Resolved in period | ${secretsResolved.length} |\n`;
-              if (secretMttrDays !== null) {
-                report += `| MTTR | ${secretMttrDays} days |\n`;
-              }
-              report += `\n`;
+              report += `| 🔴 Active (still valid) | **${activeSecrets}** |\n\n`;
 
               if (Object.keys(secretByValidity).length > 0) {
-                report += `**Open alerts by validity:**\n\n`;
+                report += `**By validity:**\n\n`;
                 report += `| Validity | Count |\n|---|---|\n`;
                 for (const [val, count] of Object.entries(secretByValidity).sort((a, b) => b[1] - a[1])) {
                   report += `| ${val} | ${count} |\n`;
@@ -411,7 +232,7 @@ jobs:
               }
 
               if (Object.keys(secretByType).length > 0) {
-                report += `**Open alerts by secret type:**\n\n`;
+                report += `**By secret type:**\n\n`;
                 report += `| Secret Type | Count |\n|---|---|\n`;
                 for (const [type, count] of Object.entries(secretByType).sort((a, b) => b[1] - a[1])) {
                   report += `| ${type} | ${count} |\n`;
@@ -420,48 +241,43 @@ jobs:
               }
 
               if (secretsOpen.length > 0) {
-                report += `**Open secret alerts:**\n\n`;
+                report += `**Open alerts:**\n\n`;
                 report += `| # | Secret Type | Validity | Detected | Link |\n|---|---|---|---|---|\n`;
-                for (const a of secretsOpen.slice(0, 10)) {
+                for (const a of secretsOpen.slice(0, 20)) {
                   const detected = new Date(a.created_at).toLocaleDateString('en-CA');
                   report += `| ${a.number} | ${a.secret_type_display_name ?? a.secret_type} | ${a.validity ?? 'unknown'} | ${detected} | [→](${a.html_url}) |\n`;
                 }
-                if (secretsOpen.length > 10) report += `\n_...and ${secretsOpen.length - 10} more. View all in the Security tab._\n`;
+                if (secretsOpen.length > 20) report += `\n_...and ${secretsOpen.length - 20} more. [View all](https://github.com/${owner}/${repo}/security/secret-scanning)_\n`;
                 report += `\n`;
               }
             }
 
-            // ── Section 4: Action items ───────────────────────────────────────
+            // ── Action Items ──────────────────────────────────────────────────
             report += `---\n### ✅ Action Items\n\n`;
-
             const actions = [];
             if (codeqlBySev.critical.length > 0)
-              actions.push(`🚨 **${codeqlBySev.critical.length} critical CodeQL alert(s)** — must be fixed immediately, these block PR merges`);
+              actions.push(`🚨 **${codeqlBySev.critical.length} critical CodeQL alert(s)** — fix immediately, blocks PR merges`);
             if (depBySev.critical > 0)
-              actions.push(`🚨 **${depBySev.critical} critical Dependabot alert(s)** — update vulnerable dependencies immediately`);
+              actions.push(`🚨 **${depBySev.critical} critical Dependabot alert(s)** — update dependencies immediately`);
             if (activeSecrets > 0)
-              actions.push(`🔑 **${activeSecrets} active secret alert(s)** — credentials are still valid, rotate immediately`);
+              actions.push(`🔑 **${activeSecrets} active secret(s) detected** — credentials are still valid, rotate immediately`);
             else if (secretsOpen.length > 0)
               actions.push(`🔑 **${secretsOpen.length} open secret alert(s)** — review and close alerts for rotated/revoked credentials`);
             if (codeqlBySev.high.length > 0)
               actions.push(`🔴 **${codeqlBySev.high.length} high CodeQL alert(s)** — fix within current sprint`);
             if (depBySev.high > 0)
               actions.push(`🔴 **${depBySev.high} high Dependabot alert(s)** — fix within current sprint`);
-            if (codeqlBySev.error.length > 0)
-              actions.push(`❌ **${codeqlBySev.error.length} CodeQL error(s)** — non-security bugs that block quality gate`);
 
             if (actions.length === 0) {
               report += `> ✅ No critical or high priority actions required.\n\n`;
             } else {
-              for (const action of actions) {
-                report += `- ${action}\n`;
-              }
+              for (const action of actions) report += `- ${action}\n`;
               report += `\n`;
             }
 
-            report += `\n> 🔗 [View all CodeQL alerts](https://github.com/${context.repo.owner}/${context.repo.repo}/security/code-scanning) · `;
-            report += `[Dependabot alerts](https://github.com/${context.repo.owner}/${context.repo.repo}/security/dependabot) · `;
-            report += `[Secret scanning](https://github.com/${context.repo.owner}/${context.repo.repo}/security/secret-scanning)\n\n`;
+            report += `\n> 🔗 [CodeQL](https://github.com/${owner}/${repo}/security/code-scanning) · `;
+            report += `[Dependabot](https://github.com/${owner}/${repo}/security/dependabot) · `;
+            report += `[Secret scanning](https://github.com/${owner}/${repo}/security/secret-scanning)\n\n`;
             report += `---\n> _Auto-generated by GHAS Adoption Report workflow_`;
 
             // ── Write to workflow summary ──────────────────────────────────────
@@ -475,40 +291,22 @@ jobs:
             const issueBody   = `${issueMarker}\n${report}`;
 
             try {
-              await github.rest.issues.createLabel({
-                owner: context.repo.owner,
-                repo:  context.repo.repo,
-                name:  issueLabel,
-                color: 'd93f0b',
-              });
+              await github.rest.issues.createLabel({ owner, repo, name: issueLabel, color: 'd93f0b' });
             } catch (_) {}
 
             const { data: existingIssues } = await github.rest.issues.listForRepo({
-              owner:    context.repo.owner,
-              repo:     context.repo.repo,
-              state:    'open',
-              labels:   issueLabel,
-              per_page: 10,
+              owner, repo, state: 'open', labels: issueLabel, per_page: 10,
             });
 
             const existing = existingIssues.find(i => i.body?.includes(issueMarker));
             if (existing) {
-              await github.rest.issues.update({
-                owner:        context.repo.owner,
-                repo:         context.repo.repo,
-                issue_number: existing.number,
-                state:        'closed',
-              });
+              await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: 'closed' });
               core.info(`Closed old report issue #${existing.number}`);
             }
 
             const { data: newIssue } = await github.rest.issues.create({
-              owner:  context.repo.owner,
-              repo:   context.repo.repo,
-              title:  issueTitle,
-              body:   issueBody,
-              labels: [issueLabel],
+              owner, repo, title: issueTitle, body: issueBody, labels: [issueLabel],
             });
 
-            core.info(`GHAS report issue created: #${newIssue.number} — ${newIssue.html_url}`);
-            core.notice(`GHAS summary: ${codeqlAlerts.length} CodeQL | ${dependabotOpen.length} Dependabot | ${secretsOpen.length} Secrets open`);
+            core.info(`Report issue created: #${newIssue.number} — ${newIssue.html_url}`);
+            core.notice(`GHAS: ${codeqlAlerts.length} CodeQL | ${dependabotOpen.length} Dependabot | ${secretsOpen.length} Secrets`);
