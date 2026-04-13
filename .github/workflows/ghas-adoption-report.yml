@@ -9,6 +9,7 @@
 # Posts: GitHub Issue tagged ghas-report + Workflow summary
 #
 # Requires: GHAS_REPORT_TOKEN secret (PAT with security_events + repo scopes)
+#           needed for Dependabot + Secret Scanning REST APIs
 
 name: GHAS Adoption Report
 
@@ -46,16 +47,16 @@ jobs:
             core.info(`Generating GHAS report — last ${DAYS_BACK} days`);
 
             function severityBadge(sev) {
-              if (!sev) return '⚪ Unknown';
+              if (!sev) return '\u26aa Unknown';
               const s = sev.toLowerCase();
-              if (s === 'critical')                   return '🚨 Critical';
-              if (s === 'high')                       return '🔴 High';
-              if (s === 'medium' || s === 'moderate') return '🟡 Medium';
-              if (s === 'low')                        return '🟢 Low';
-              if (s === 'error')                      return '❌ Error';
-              if (s === 'warning')                    return '⚠️ Warning';
-              if (s === 'note')                       return '📝 Note';
-              return `⚪ ${sev}`;
+              if (s === 'critical')                   return '\ud83d\udea8 Critical';
+              if (s === 'high')                       return '\ud83d\udd34 High';
+              if (s === 'medium' || s === 'moderate') return '\ud83d\udfe1 Medium';
+              if (s === 'low')                        return '\ud83d\udfe2 Low';
+              if (s === 'error')                      return '\u274c Error';
+              if (s === 'warning')                    return '\u26a0\ufe0f Warning';
+              if (s === 'note')                       return '\ud83d\udcdd Note';
+              return `\u26aa ${sev}`;
             }
 
             const ghasPat   = process.env.GHAS_PAT;
@@ -67,18 +68,17 @@ jobs:
             // SECTION 1 — CodeQL Code Scanning (open alerts only)
             // ══════════════════════════════════════════════════════════════════
             core.info('Fetching CodeQL alerts...');
-
             let codeqlAlerts = [];
             try {
               const { data } = await github.rest.codeScanning.listAlertsForRepo({
                 owner, repo, state: 'open', per_page: 100,
               });
               codeqlAlerts = data;
+              core.info(`CodeQL: fetched ${codeqlAlerts.length} open alerts`);
             } catch (e) {
               core.warning(`Could not fetch CodeQL alerts: ${e.message}`);
             }
 
-            // Bucket by severity — security_severity_level takes priority over severity
             const codeqlBySev = { critical: [], high: [], medium: [], low: [], error: [], warning: [], note: [], unknown: [] };
             for (const alert of codeqlAlerts) {
               let sev = alert.rule?.security_severity_level?.toLowerCase();
@@ -91,9 +91,11 @@ jobs:
             // SECTION 2 — Dependabot (open alerts only)
             // ══════════════════════════════════════════════════════════════════
             core.info('Fetching Dependabot alerts...');
-
             let dependabotOpen = [];
+            let dependabotError = null;
+
             if (!patClient) {
+              dependabotError = '`GHAS_REPORT_TOKEN` secret is not configured — add it in repo Settings > Secrets > Actions';
               core.warning('GHAS_REPORT_TOKEN not set — skipping Dependabot');
             } else {
               try {
@@ -101,12 +103,13 @@ jobs:
                   owner, repo, state: 'open', per_page: 100,
                 });
                 dependabotOpen = data;
+                core.info(`Dependabot: fetched ${dependabotOpen.length} open alerts`);
               } catch (e) {
-                core.warning(`Could not fetch Dependabot alerts: ${e.message}`);
+                dependabotError = `API error (${e.status ?? 'unknown'}): ${e.message} — verify GHAS_REPORT_TOKEN has \`repo\` scope`;
+                core.error(`Could not fetch Dependabot alerts: ${e.message}`);
               }
             }
 
-            // Bucket by severity — map Dependabot "moderate" → "medium"
             const depBySev = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
             for (const alert of dependabotOpen) {
               const raw = alert.security_advisory?.severity?.toLowerCase() ?? 'unknown';
@@ -118,9 +121,11 @@ jobs:
             // SECTION 3 — Secret Scanning (open alerts only)
             // ══════════════════════════════════════════════════════════════════
             core.info('Fetching Secret Scanning alerts...');
-
             let secretsOpen = [];
+            let secretsError = null;
+
             if (!patClient) {
+              secretsError = '`GHAS_REPORT_TOKEN` secret is not configured — add it in repo Settings > Secrets > Actions';
               core.warning('GHAS_REPORT_TOKEN not set — skipping Secret Scanning');
             } else {
               try {
@@ -128,8 +133,10 @@ jobs:
                   owner, repo, state: 'open', per_page: 100,
                 });
                 secretsOpen = data;
+                core.info(`Secret Scanning: fetched ${secretsOpen.length} open alerts`);
               } catch (e) {
-                core.warning(`Could not fetch Secret Scanning alerts: ${e.message}`);
+                secretsError = `API error (${e.status ?? 'unknown'}): ${e.message} — verify GHAS_REPORT_TOKEN has \`repo\` scope`;
+                core.error(`Could not fetch Secret Scanning alerts: ${e.message}`);
               }
             }
 
@@ -137,9 +144,9 @@ jobs:
             const secretByValidity = {};
             for (const alert of secretsOpen) {
               const type = alert.secret_type_display_name ?? alert.secret_type ?? 'unknown';
-              secretByType[type]                           = (secretByType[type] ?? 0) + 1;
+              secretByType[type] = (secretByType[type] ?? 0) + 1;
               const val = alert.validity ?? 'unknown';
-              secretByValidity[val]                        = (secretByValidity[val] ?? 0) + 1;
+              secretByValidity[val] = (secretByValidity[val] ?? 0) + 1;
             }
             const activeSecrets = secretsOpen.filter(a => (a.validity ?? '') === 'active').length;
 
@@ -147,28 +154,28 @@ jobs:
             // BUILD REPORT
             // ══════════════════════════════════════════════════════════════════
             const reportDate = new Date().toLocaleDateString('en-CA');
-            let report = `## 🛡️ GHAS Security Report — ${reportDate}\n\n`;
-            report += `**Repo:** ${owner}/${repo} · **Generated:** ${new Date().toUTCString()}\n\n`;
+            let report = `## \ud83d\udee1\ufe0f GHAS Security Report \u2014 ${reportDate}\n\n`;
+            report += `**Repo:** ${owner}/${repo} \u00b7 **Generated:** ${new Date().toUTCString()}\n\n`;
 
-            // ── Overall summary ───────────────────────────────────────────────
+            // Summary table
             const totalOpen = codeqlAlerts.length + dependabotOpen.length + secretsOpen.length;
-            report += `### 📈 Summary\n\n`;
+            report += `### \ud83d\udcc8 Summary\n\n`;
             report += `| Scanner | Open Alerts |\n|---|---|\n`;
-            report += `| 🔍 CodeQL        | **${codeqlAlerts.length}** |\n`;
-            report += `| 📦 Dependabot    | **${dependabotOpen.length}** |\n`;
-            report += `| 🔑 Secret Scanning | **${secretsOpen.length}** |\n`;
+            report += `| \ud83d\udd0d CodeQL          | **${codeqlAlerts.length}** |\n`;
+            report += `| \ud83d\udce6 Dependabot      | **${dependabotOpen.length}** |\n`;
+            report += `| \ud83d\udd11 Secret Scanning | **${secretsOpen.length}** |\n`;
             report += `| **Total**        | **${totalOpen}** |\n\n`;
 
             // ── Section 1: CodeQL ─────────────────────────────────────────────
-            report += `---\n### 🔍 CodeQL Code Scanning\n\n`;
+            report += `---\n### \ud83d\udd0d CodeQL Code Scanning\n\n`;
             report += `| Severity | Count |\n|---|---|\n`;
-            report += `| 🚨 Critical | ${codeqlBySev.critical.length} |\n`;
-            report += `| 🔴 High     | ${codeqlBySev.high.length} |\n`;
-            report += `| 🟡 Medium   | ${codeqlBySev.medium.length} |\n`;
-            report += `| 🟢 Low      | ${codeqlBySev.low.length} |\n`;
-            report += `| ❌ Error    | ${codeqlBySev.error.length} |\n`;
-            report += `| ⚠️ Warning  | ${codeqlBySev.warning.length} |\n`;
-            report += `| 📝 Note     | ${codeqlBySev.note.length} |\n`;
+            report += `| \ud83d\udea8 Critical | ${codeqlBySev.critical.length} |\n`;
+            report += `| \ud83d\udd34 High     | ${codeqlBySev.high.length} |\n`;
+            report += `| \ud83d\udfe1 Medium   | ${codeqlBySev.medium.length} |\n`;
+            report += `| \ud83d\udfe2 Low      | ${codeqlBySev.low.length} |\n`;
+            report += `| \u274c Error    | ${codeqlBySev.error.length} |\n`;
+            report += `| \u26a0\ufe0f Warning  | ${codeqlBySev.warning.length} |\n`;
+            report += `| \ud83d\udcdd Note     | ${codeqlBySev.note.length} |\n`;
             report += `| **Total**   | **${codeqlAlerts.length}** |\n\n`;
 
             if (codeqlAlerts.length > 0) {
@@ -176,51 +183,53 @@ jobs:
               report += `| # | Severity | Rule | Description | File | Link |\n|---|---|---|---|---|---|\n`;
               for (const a of codeqlAlerts.slice(0, 25)) {
                 const sev  = a.rule?.security_severity_level || a.rule?.severity || 'unknown';
-                const desc = a.rule?.description ?? a.rule?.id ?? '—';
-                const file = a.most_recent_instance?.location?.path ?? '—';
+                const desc = (a.rule?.description ?? a.rule?.id ?? '\u2014').replace(/\|/g, '\\|');
+                const file = a.most_recent_instance?.location?.path ?? '\u2014';
                 const line = a.most_recent_instance?.location?.start_line ?? '?';
-                report += `| ${a.number} | ${severityBadge(sev)} | \`${a.rule?.id ?? '—'}\` | ${desc} | \`${file}:${line}\` | [→](${a.html_url}) |\n`;
+                report += `| ${a.number} | ${severityBadge(sev)} | \`${a.rule?.id ?? '\u2014'}\` | ${desc} | \`${file}:${line}\` | [\u2192](${a.html_url}) |\n`;
               }
-              if (codeqlAlerts.length > 25) report += `\n_...and ${codeqlAlerts.length - 25} more. [View all](https://github.com/${owner}/${repo}/security/code-scanning)_\n`;
+              if (codeqlAlerts.length > 25) {
+                report += `\n_...and ${codeqlAlerts.length - 25} more. [View all](https://github.com/${owner}/${repo}/security/code-scanning)_\n`;
+              }
               report += `\n`;
             }
 
             // ── Section 2: Dependabot ─────────────────────────────────────────
-            report += `---\n### 📦 Dependabot Vulnerability Alerts\n\n`;
-            if (!patClient) {
-              report += `> ⚠️ _Skipped: \`GHAS_REPORT_TOKEN\` secret not configured._\n\n`;
+            report += `---\n### \ud83d\udce6 Dependabot Vulnerability Alerts\n\n`;
+            if (dependabotError) {
+              report += `> \u26a0\ufe0f _${dependabotError}_\n\n`;
             } else {
               report += `| Severity | Count |\n|---|---|\n`;
-              report += `| 🚨 Critical | ${depBySev.critical} |\n`;
-              report += `| 🔴 High     | ${depBySev.high} |\n`;
-              report += `| 🟡 Medium   | ${depBySev.medium} |\n`;
-              report += `| 🟢 Low      | ${depBySev.low} |\n`;
+              report += `| \ud83d\udea8 Critical | ${depBySev.critical} |\n`;
+              report += `| \ud83d\udd34 High     | ${depBySev.high} |\n`;
+              report += `| \ud83d\udfe1 Medium   | ${depBySev.medium} |\n`;
+              report += `| \ud83d\udfe2 Low      | ${depBySev.low} |\n`;
               report += `| **Total**   | **${dependabotOpen.length}** |\n\n`;
 
               if (dependabotOpen.length > 0) {
                 report += `**Open alerts:**\n\n`;
                 report += `| # | Severity | Package | Advisory | CVE | Link |\n|---|---|---|---|---|---|\n`;
                 for (const a of dependabotOpen) {
-                  const raw    = a.security_advisory?.severity ?? 'unknown';
-                  const sev    = raw.toLowerCase() === 'moderate' ? 'medium' : raw;
-                  const pkg    = a.dependency?.package?.name ?? '—';
-                  const eco    = a.dependency?.package?.ecosystem ?? '';
-                  const title  = a.security_advisory?.summary ?? '—';
-                  const cve    = a.security_advisory?.cve_id ?? a.security_advisory?.ghsa_id ?? '—';
-                  report += `| ${a.number} | ${severityBadge(sev)} | \`${pkg}\` (${eco}) | ${title} | ${cve} | [→](${a.html_url}) |\n`;
+                  const raw   = a.security_advisory?.severity ?? 'unknown';
+                  const sev   = raw.toLowerCase() === 'moderate' ? 'medium' : raw;
+                  const pkg   = a.dependency?.package?.name ?? '\u2014';
+                  const eco   = a.dependency?.package?.ecosystem ?? '';
+                  const title = (a.security_advisory?.summary ?? '\u2014').replace(/\|/g, '\\|');
+                  const cve   = a.security_advisory?.cve_id ?? a.security_advisory?.ghsa_id ?? '\u2014';
+                  report += `| ${a.number} | ${severityBadge(sev)} | \`${pkg}\` (${eco}) | ${title} | ${cve} | [\u2192](${a.html_url}) |\n`;
                 }
                 report += `\n`;
               }
             }
 
             // ── Section 3: Secret Scanning ────────────────────────────────────
-            report += `---\n### 🔑 Secret Scanning\n\n`;
-            if (!patClient) {
-              report += `> ⚠️ _Skipped: \`GHAS_REPORT_TOKEN\` secret not configured._\n\n`;
+            report += `---\n### \ud83d\udd11 Secret Scanning\n\n`;
+            if (secretsError) {
+              report += `> \u26a0\ufe0f _${secretsError}_\n\n`;
             } else {
               report += `| Metric | Count |\n|---|---|\n`;
               report += `| Open alerts | **${secretsOpen.length}** |\n`;
-              report += `| 🔴 Active (still valid) | **${activeSecrets}** |\n\n`;
+              report += `| \ud83d\udd34 Active (still valid) | **${activeSecrets}** |\n\n`;
 
               if (Object.keys(secretByValidity).length > 0) {
                 report += `**By validity:**\n\n`;
@@ -245,38 +254,40 @@ jobs:
                 report += `| # | Secret Type | Validity | Detected | Link |\n|---|---|---|---|---|\n`;
                 for (const a of secretsOpen.slice(0, 20)) {
                   const detected = new Date(a.created_at).toLocaleDateString('en-CA');
-                  report += `| ${a.number} | ${a.secret_type_display_name ?? a.secret_type} | ${a.validity ?? 'unknown'} | ${detected} | [→](${a.html_url}) |\n`;
+                  report += `| ${a.number} | ${a.secret_type_display_name ?? a.secret_type} | ${a.validity ?? 'unknown'} | ${detected} | [\u2192](${a.html_url}) |\n`;
                 }
-                if (secretsOpen.length > 20) report += `\n_...and ${secretsOpen.length - 20} more. [View all](https://github.com/${owner}/${repo}/security/secret-scanning)_\n`;
+                if (secretsOpen.length > 20) {
+                  report += `\n_...and ${secretsOpen.length - 20} more. [View all](https://github.com/${owner}/${repo}/security/secret-scanning)_\n`;
+                }
                 report += `\n`;
               }
             }
 
             // ── Action Items ──────────────────────────────────────────────────
-            report += `---\n### ✅ Action Items\n\n`;
+            report += `---\n### \u2705 Action Items\n\n`;
             const actions = [];
             if (codeqlBySev.critical.length > 0)
-              actions.push(`🚨 **${codeqlBySev.critical.length} critical CodeQL alert(s)** — fix immediately, blocks PR merges`);
+              actions.push(`\ud83d\udea8 **${codeqlBySev.critical.length} critical CodeQL alert(s)** \u2014 fix immediately, blocks PR merges`);
             if (depBySev.critical > 0)
-              actions.push(`🚨 **${depBySev.critical} critical Dependabot alert(s)** — update dependencies immediately`);
+              actions.push(`\ud83d\udea8 **${depBySev.critical} critical Dependabot alert(s)** \u2014 update dependencies immediately`);
             if (activeSecrets > 0)
-              actions.push(`🔑 **${activeSecrets} active secret(s) detected** — credentials are still valid, rotate immediately`);
+              actions.push(`\ud83d\udd11 **${activeSecrets} active secret(s) detected** \u2014 credentials still valid, rotate immediately`);
             else if (secretsOpen.length > 0)
-              actions.push(`🔑 **${secretsOpen.length} open secret alert(s)** — review and close alerts for rotated/revoked credentials`);
+              actions.push(`\ud83d\udd11 **${secretsOpen.length} open secret alert(s)** \u2014 review and close alerts for rotated/revoked credentials`);
             if (codeqlBySev.high.length > 0)
-              actions.push(`🔴 **${codeqlBySev.high.length} high CodeQL alert(s)** — fix within current sprint`);
+              actions.push(`\ud83d\udd34 **${codeqlBySev.high.length} high CodeQL alert(s)** \u2014 fix within current sprint`);
             if (depBySev.high > 0)
-              actions.push(`🔴 **${depBySev.high} high Dependabot alert(s)** — fix within current sprint`);
+              actions.push(`\ud83d\udd34 **${depBySev.high} high Dependabot alert(s)** \u2014 fix within current sprint`);
 
             if (actions.length === 0) {
-              report += `> ✅ No critical or high priority actions required.\n\n`;
+              report += `> \u2705 No critical or high priority actions required.\n\n`;
             } else {
               for (const action of actions) report += `- ${action}\n`;
               report += `\n`;
             }
 
-            report += `\n> 🔗 [CodeQL](https://github.com/${owner}/${repo}/security/code-scanning) · `;
-            report += `[Dependabot](https://github.com/${owner}/${repo}/security/dependabot) · `;
+            report += `\n> \ud83d\udd17 [CodeQL](https://github.com/${owner}/${repo}/security/code-scanning) \u00b7 `;
+            report += `[Dependabot](https://github.com/${owner}/${repo}/security/dependabot) \u00b7 `;
             report += `[Secret scanning](https://github.com/${owner}/${repo}/security/secret-scanning)\n\n`;
             report += `---\n> _Auto-generated by GHAS Adoption Report workflow_`;
 
@@ -287,7 +298,7 @@ jobs:
             // ── Create or update GitHub Issue ──────────────────────────────────
             const issueLabel  = 'ghas-report';
             const issueMarker = '<!-- ghas-adoption-report -->';
-            const issueTitle  = `🛡️ GHAS Security Report — ${reportDate}`;
+            const issueTitle  = `\ud83d\udee1\ufe0f GHAS Security Report \u2014 ${reportDate}`;
             const issueBody   = `${issueMarker}\n${report}`;
 
             try {
@@ -308,5 +319,5 @@ jobs:
               owner, repo, title: issueTitle, body: issueBody, labels: [issueLabel],
             });
 
-            core.info(`Report issue created: #${newIssue.number} — ${newIssue.html_url}`);
+            core.info(`Report issue created: #${newIssue.number} \u2014 ${newIssue.html_url}`);
             core.notice(`GHAS: ${codeqlAlerts.length} CodeQL | ${dependabotOpen.length} Dependabot | ${secretsOpen.length} Secrets`);
