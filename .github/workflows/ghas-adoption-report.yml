@@ -30,7 +30,7 @@ on:
 
 permissions:
   contents: read
-  security-events: read    # read CodeQL + secret scanning alerts
+  security-events: read    # read CodeQL alerts
   issues: write            # create/update report issue
   pull-requests: read
 
@@ -43,6 +43,8 @@ jobs:
     steps:
       - name: Generate GHAS metrics
         uses: actions/github-script@v7
+        env:
+          GHAS_PAT: ${{ secrets.GHAS_REPORT_TOKEN }}
         with:
           github-token: ${{ secrets.GHAS_REPORT_TOKEN }}
           script: |
@@ -61,8 +63,11 @@ jobs:
               const s = sev.toLowerCase();
               if (s === 'critical') return '🚨 Critical';
               if (s === 'high')     return '🔴 High';
-              if (s === 'medium')   return '🟡 Medium';
+              if (s === 'medium' || s === 'moderate')   return '🟡 Medium';
               if (s === 'low')      return '🟢 Low';
+              if (s === 'error')    return '❌ Error';
+              if (s === 'warning')  return '⚠️ Warning';
+              if (s === 'note')     return '📝 Note';
               return `⚪ ${sev}`;
             }
 
@@ -101,17 +106,20 @@ jobs:
             }
 
             // Bucket open alerts by severity
-            const codeqlBySev = { critical: [], high: [], medium: [], low: [], unknown: [] };
+            const codeqlBySev = { critical: [], high: [], medium: [], low: [], error: [], warning: [], note: [], unknown: [] };
             for (const alert of codeqlAlerts) {
-              const sev = alert.rule?.security_severity_level?.toLowerCase() ?? 'unknown';
+              let sev = alert.rule?.security_severity_level?.toLowerCase();
+              if (!sev) sev = alert.rule?.severity?.toLowerCase();
+              if (!sev) sev = 'unknown';
               (codeqlBySev[sev] ?? codeqlBySev.unknown).push(alert);
             }
 
-            // Per-rule breakdown
+            // Per-rule breakdown (fall back to general severity for non-security rules)
             const codeqlByRule = {};
             for (const alert of codeqlAlerts) {
               const rule = alert.rule?.id ?? 'unknown';
-              if (!codeqlByRule[rule]) codeqlByRule[rule] = { count: 0, sev: alert.rule?.security_severity_level ?? 'unknown' };
+              const sev  = alert.rule?.security_severity_level ?? alert.rule?.severity ?? 'unknown';
+              if (!codeqlByRule[rule]) codeqlByRule[rule] = { count: 0, sev };
               codeqlByRule[rule].count++;
             }
 
@@ -128,17 +136,23 @@ jobs:
             const codeqlNew = codeqlAlerts.filter(a =>
               new Date(a.created_at) >= new Date(SINCE_DATE)
             );
+            const dependabotNew = dependabotOpen.filter(a =>
+              new Date(a.created_at) >= new Date(SINCE_DATE)
+            );
 
             // ══════════════════════════════════════════════════════════════════
             // SECTION 2 — Dependabot Alerts
             // ══════════════════════════════════════════════════════════════════
             core.info('Fetching Dependabot alerts...');
 
+            const ghasPat = process.env.GHAS_PAT;
+            const patGithub = ghasPat ? github.getOctokit(ghasPat) : github;
+
             let dependabotOpen = [];
             let dependabotFixed = [];
 
             try {
-              const { data } = await github.rest.dependabot.listAlertsForRepo({
+              const { data } = await patGithub.rest.dependabot.listAlertsForRepo({
                 owner:    context.repo.owner,
                 repo:     context.repo.repo,
                 state:    'open',
@@ -150,7 +164,7 @@ jobs:
             }
 
             try {
-              const { data } = await github.rest.dependabot.listAlertsForRepo({
+              const { data } = await patGithub.rest.dependabot.listAlertsForRepo({
                 owner:    context.repo.owner,
                 repo:     context.repo.repo,
                 state:    'fixed',
@@ -166,7 +180,8 @@ jobs:
             // Bucket by severity
             const depBySev = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
             for (const alert of dependabotOpen) {
-              const sev = alert.security_advisory?.severity?.toLowerCase() ?? 'unknown';
+              const rawSev = alert.security_advisory?.severity?.toLowerCase() ?? 'unknown';
+              const sev = rawSev === 'moderate' ? 'medium' : rawSev;
               depBySev[sev] = (depBySev[sev] ?? 0) + 1;
             }
 
@@ -203,7 +218,7 @@ jobs:
             let secretsResolved = [];
 
             try {
-              const { data } = await github.rest.secretScanning.listAlertsForRepo({
+              const { data } = await patGithub.rest.secretScanning.listAlertsForRepo({
                 owner:    context.repo.owner,
                 repo:     context.repo.repo,
                 state:    'open',
@@ -215,7 +230,7 @@ jobs:
             }
 
             try {
-              const { data } = await github.rest.secretScanning.listAlertsForRepo({
+              const { data } = await patGithub.rest.secretScanning.listAlertsForRepo({
                 owner:    context.repo.owner,
                 repo:     context.repo.repo,
                 state:    'resolved',
@@ -228,11 +243,15 @@ jobs:
               core.warning(`Could not fetch resolved secret alerts: ${e.message}`);
             }
 
-            // Bucket by secret type
+            // Bucket by secret type and validity
             const secretByType = {};
+            const secretByValidity = {};
             for (const alert of secretsOpen) {
               const type = alert.secret_type_display_name ?? alert.secret_type ?? 'unknown';
               secretByType[type] = (secretByType[type] ?? 0) + 1;
+
+              const val = alert.validity ?? 'unknown';
+              secretByValidity[val] = (secretByValidity[val] ?? 0) + 1;
             }
 
             // Secrets opened in period
@@ -257,16 +276,18 @@ jobs:
             report += `**Period:** Last ${DAYS_BACK} days · **Repo:** ${context.repo.owner}/${context.repo.repo} · **Generated:** ${new Date().toUTCString()}\n\n`;
 
             // ── Overall health banner ────────────────────────────────────────
-            const totalOpen     = codeqlAlerts.length + dependabotOpen.length + secretsOpen.length;
-            const totalCritical = codeqlBySev.critical.length + depBySev.critical + secretsOpen.length;
-            const totalResolved = codeqlResolved.length + dependabotFixed.length + secretsResolved.length;
+            const totalOpen      = codeqlAlerts.length + dependabotOpen.length + secretsOpen.length;
+            const activeSecrets  = secretsOpen.filter(a => (a.validity ?? 'unknown') === 'active').length;
+            const totalCritical  = codeqlBySev.critical.length + depBySev.critical + activeSecrets;
+            const totalResolved  = codeqlResolved.length + dependabotFixed.length + secretsResolved.length;
+            const totalNew       = codeqlNew.length + dependabotNew.length + secretsNew.length;
 
             report += `### 📈 Overall Health\n\n`;
             report += `| Metric | Value |\n|---|---|\n`;
             report += `| Total open alerts | **${totalOpen}** |\n`;
-            report += `| 🚨 Critical / secrets open | **${totalCritical}** |\n`;
+            report += `| 🚨 Critical (CodeQL+Dep) / Active secrets | **${totalCritical}** |\n`;
             report += `| ✅ Resolved in period | ${totalResolved} |\n`;
-            report += `| New alerts in period | ${codeqlNew.length + secretsNew.length} |\n\n`;
+            report += `| New alerts in period | ${totalNew} |\n\n`;
 
             // ── Section 1: CodeQL ────────────────────────────────────────────
             report += `---\n### 🔍 CodeQL Code Scanning\n\n`;
@@ -275,6 +296,9 @@ jobs:
             report += `| 🔴 High     | ${codeqlBySev.high.length}     | ${codeqlNew.filter(a => a.rule?.security_severity_level === 'high').length} |\n`;
             report += `| 🟡 Medium   | ${codeqlBySev.medium.length}   | ${codeqlNew.filter(a => a.rule?.security_severity_level === 'medium').length} |\n`;
             report += `| 🟢 Low      | ${codeqlBySev.low.length}      | ${codeqlNew.filter(a => a.rule?.security_severity_level === 'low').length} |\n`;
+            report += `| ❌ Error    | ${codeqlBySev.error.length}    | ${codeqlNew.filter(a => !a.rule?.security_severity_level && a.rule?.severity === 'error').length} |\n`;
+            report += `| ⚠️ Warning  | ${codeqlBySev.warning.length}  | ${codeqlNew.filter(a => !a.rule?.security_severity_level && a.rule?.severity === 'warning').length} |\n`;
+            report += `| 📝 Note     | ${codeqlBySev.note.length}     | ${codeqlNew.filter(a => !a.rule?.security_severity_level && a.rule?.severity === 'note').length} |\n`;
             report += `| **Total**   | **${codeqlAlerts.length}** | **${codeqlNew.length}** |\n\n`;
 
             if (codeqlMttrDays !== null) {
@@ -296,14 +320,14 @@ jobs:
             }
 
             // Open critical/high alerts list
-            const urgentCodeql = [...codeqlBySev.critical, ...codeqlBySev.high].slice(0, 10);
+            const urgentCodeql = [...codeqlBySev.critical, ...codeqlBySev.high, ...codeqlBySev.error].slice(0, 10);
             if (urgentCodeql.length > 0) {
-              report += `**Open critical & high alerts:**\n\n`;
+              report += `**Open critical & high priority alerts:**\n\n`;
               report += `| # | Severity | Rule | File | Link |\n|---|---|---|---|---|\n`;
               for (const a of urgentCodeql) {
                 const file = a.most_recent_instance?.location?.path ?? '—';
                 const line = a.most_recent_instance?.location?.start_line ?? '?';
-                report += `| ${a.number} | ${severityBadge(a.rule?.security_severity_level)} | \`${a.rule?.id ?? '—'}\` | \`${file}:${line}\` | [→](${a.html_url}) |\n`;
+                report += `| ${a.number} | ${severityBadge(a.rule?.security_severity_level || a.rule?.severity)} | \`${a.rule?.id ?? '—'}\` | \`${file}:${line}\` | [→](${a.html_url}) |\n`;
               }
               report += `\n`;
             }
@@ -364,12 +388,21 @@ jobs:
               report += `\n`;
             }
 
+            if (Object.keys(secretByValidity).length > 0) {
+              report += `**Open alerts by validity status:**\n\n`;
+              report += `| Validity | Count |\n|---|---|\n`;
+              for (const [val, count] of Object.entries(secretByValidity).sort((a, b) => b[1] - a[1])) {
+                report += `| ${val} | ${count} |\n`;
+              }
+              report += `\n`;
+            }
+
             if (secretsOpen.length > 0) {
               report += `**Open secret alerts:**\n\n`;
-              report += `| # | Secret Type | Detected | Link |\n|---|---|---|---|\n`;
+              report += `| # | Secret Type | Validity | Detected | Link |\n|---|---|---|---|---|\n`;
               for (const a of secretsOpen.slice(0, 10)) {
                 const detected = new Date(a.created_at).toLocaleDateString('en-CA');
-                report += `| ${a.number} | ${a.secret_type_display_name ?? a.secret_type} | ${detected} | [→](${a.html_url}) |\n`;
+                report += `| ${a.number} | ${a.secret_type_display_name ?? a.secret_type} | ${a.validity ?? 'unknown'} | ${detected} | [→](${a.html_url}) |\n`;
               }
               if (secretsOpen.length > 10) report += `\n_...and ${secretsOpen.length - 10} more. View all in the Security tab._\n`;
               report += `\n`;
@@ -383,8 +416,10 @@ jobs:
               actions.push(`🚨 **${codeqlBySev.critical.length} critical CodeQL alert(s)** — must be fixed immediately, these block PR merges`);
             if (depBySev.critical > 0)
               actions.push(`🚨 **${depBySev.critical} critical Dependabot alert(s)** — update vulnerable dependencies immediately`);
-            if (secretsOpen.length > 0)
-              actions.push(`🔑 **${secretsOpen.length} open secret alert(s)** — rotate exposed credentials immediately`);
+            if (activeSecrets > 0)
+              actions.push(`🔑 **${activeSecrets} active secret alert(s)** — credentials are still valid, rotate immediately`);
+            else if (secretsOpen.length > 0)
+              actions.push(`🔑 **${secretsOpen.length} open secret alert(s)** — review and close alerts for rotated/revoked credentials`);
             if (codeqlBySev.high.length > 0)
               actions.push(`🔴 **${codeqlBySev.high.length} high CodeQL alert(s)** — fix within current sprint`);
             if (depBySev.high > 0)
