@@ -27,7 +27,7 @@ command injection, path traversal, XSS, and hardcoded credentials.
 **In a Pull Request:**
 
 When you open a PR to `dev` or `main`, the `Security Gate / Block Critical` job
-posts a comment directly on the PR listing all **critical** and **high** findings.
+posts a comment directly on the PR listing all **Critical**, **High**, **Medium**, and **Low** findings.
 
 ```
 PR → bottom of page → CodeQL Security Findings comment
@@ -37,7 +37,7 @@ The comment shows:
 
 | Column | What it means |
 |---|---|
-| Severity | 🚨 CRITICAL or ⚠️ HIGH |
+| Severity | 🚨 CRITICAL, ⚠️ HIGH, 🔵 MEDIUM, or ⚪ LOW |
 | Rule | The CodeQL rule ID e.g. `js/sql-injection` |
 | File | The file and line number with the issue |
 | Description | Short explanation of the vulnerability |
@@ -263,9 +263,43 @@ Security Gate job runs after scan completes
 
 If any of these are red, the PR cannot be merged regardless of approvals.
 
-**High severity findings** — do not block merge but appear as warnings in the
-PR comment and as annotations in the workflow run. They must be reviewed and
-resolved in a follow-up if not fixed before merge.
+**High/Medium/Low severity findings** — do not block the merge. They appear alongside critical alerts in the PR comment table so reviewers are aware of them, but they can be safely resolved later.
+
+### 4.1 Troubleshooting: "Merging is blocked" Errors
+
+Sometimes GitHub's internal expectations fall out of sync with our configurations, resulting in errors like:
+> **"Code scanning is still expecting 1 result from CodeQL"**
+
+![Placeholder for PR Merge Blocked Error Image]()
+*(Developer Note: Insert screenshot of the blocked PR merge button here)*
+
+If your CodeQL workflows (`javascript` / `python`) show as green and successful, but the PR is still blocked by the above message, here is how you fix it:
+
+**Scenario A: Typo in Required Status Checks**
+If `CodeQL` was manually entered into your Branch Protection settings, GitHub awaits an Action expressly named `CodeQL` (which doesn't exist).
+1. Go to **Settings** → **Branches**
+2. Edit your branch protection rule (e.g., `dev` or `main`)
+3. Remove any entries that just say `CodeQL`
+4. Ensure we only require specific jobs (e.g., `CodeQL Analyze (javascript)`)
+
+![Placeholder for GitHub Branch Protection Settings Image]()
+*(Developer Note: Insert screenshot of the branch protection configuration here)*
+
+**Scenario B: Default Setup vs. Advanced Setup Conflict**
+If automatic "Default Setup" is on, it conflicts with our custom `codeql.yml` workflows.
+1. Go to **Settings** → **Code security and analysis** → **Code scanning**
+2. If "Default setup" is enabled, disable it.
+
+![Placeholder for Code Scanning Settings Disable Default Setup Image]()
+*(Developer Note: Insert screenshot of disabling default Code Scanning setup here)*
+
+**Scenario C: Broken Baseline Expectation**
+If the base branch (`dev` or `main`) has a different CodeQL configuration than the PR branch, expectations misalign.
+* **Fix / Bypass:** Push an empty commit to force a fresh CodeQL run and re-synchronize exactly what should be expected:
+```bash
+git commit --allow-empty -m "trigger codeql"
+git push origin <your-branch-name>
+```
 
 ---
 
@@ -296,6 +330,7 @@ Use this checklist when resolving a security alert before your PR can merge.
 - [ ] Updated the dependency to the patched version
 - [ ] Ran the test suite to confirm nothing broke
 - [ ] Verified the Dependabot alert is now closed
+
 
 ### Secret scanning alert
 - [ ] Rotated the exposed secret in the provider dashboard

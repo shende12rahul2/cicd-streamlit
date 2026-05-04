@@ -16,12 +16,12 @@ on:
     branches:
       - dev
       - uat
-      - production
+      - main
   push:
     branches:
       - dev
       - main
-      - production
+      - uat
   schedule:
     - cron: "0 2 * * 1"
 
@@ -155,6 +155,8 @@ jobs:
             // ── 2. Bucket alerts by severity ──────────────────────────────────
             const critical = [];
             const high     = [];
+            const medium   = [];
+            const low      = [];
 
             for (const alert of alerts) {
               const loc = alert.most_recent_instance?.location;
@@ -169,26 +171,26 @@ jobs:
               };
               if      (sev === 'critical') critical.push(item);
               else if (sev === 'high')     high.push(item);
-              // medium / low / info — silently ignored in PR comment
+              else if (sev === 'medium')   medium.push(item);
+              else                         low.push(item);
             }
 
-            // ── 3. Build comment — critical + high only ───────────────────────
+            // ── 3. Build comment — all findings ───────────────────────
             function badge(sev) {
-              return sev === 'critical' ? '🚨 **CRITICAL**' : '⚠️ **HIGH**';
+              if (sev === 'critical') return '🚨 **CRITICAL**';
+              if (sev === 'high') return '⚠️ **HIGH**';
+              if (sev === 'medium') return '🔵 **MEDIUM**';
+              return '⚪ **LOW**';
             }
 
-            const visibleFindings = [...critical, ...high];
+            const visibleFindings = [...critical, ...high, ...medium, ...low];
             const branch = context.ref?.replace('refs/heads/', '') ?? context.ref;
             let body = `## 🔐 CodeQL Security Findings\n\n`;
 
             if (critical.length) {
-              body += `> ❌ **${critical.length} critical — merge is BLOCKED.**`;
-              if (high.length) body += ` ${high.length} high also found.`;
-              body += `\n\n`;
-            } else if (high.length) {
-              body += `> ⚠️ **${high.length} high severity issue(s) found.** No critical — merge is not blocked.\n\n`;
+              body += `> ❌ **${critical.length} critical finding(s) — merge is BLOCKED.**\n\n`;
             } else {
-              body += `> ✅ No critical or high severity issues.\n\n`;
+              body += `> ✅ No critical security issues found! Merge is unblocked.\n\n`;
             }
 
             if (visibleFindings.length > 0) {
@@ -198,7 +200,7 @@ jobs:
                 body += `| ${badge(f.sev)} | \`${f.ruleId}\` | \`${f.filePath}\` | ${f.line} | ${f.desc} | [→](${f.url}) |\n`;
               }
             } else {
-              body += `_No critical or high findings._\n`;
+              body += `_No findings._\n`;
             }
 
             body += `\n---\n_CodeQL · \`${branch}\` · ${new Date().toUTCString()}_`;

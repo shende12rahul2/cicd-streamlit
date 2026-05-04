@@ -206,9 +206,6 @@ pre-commit run --all-files    # Run all hooks
 ---
 
 ## 📜 License
-
+This security check of code
 MIT
-
-
-
-
+Apache 2.0
