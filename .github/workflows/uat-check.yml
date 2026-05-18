@@ -1,0 +1,23 @@
+name: Allow Only Release Branch To UAT
+
+on:
+  pull_request:
+    branches:
+      - uat
+
+jobs:
+  validate-source-branch:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check source branch
+        run: |
+          echo "Source branch: ${{ github.head_ref }}"
+          echo "Target branch: ${{ github.base_ref }}"
+
+          if [[ ! "${{ github.head_ref }}" =~ ^release\/v.* ]]; then
+            echo "ERROR: Only release/v* branches can merge into uat"
+            exit 1
+          fi
+
+          echo "Valid release branch"
