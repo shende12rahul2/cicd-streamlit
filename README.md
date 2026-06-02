@@ -202,6 +202,7 @@ pre-commit run --all-files    # Run all hooks
 4. Push and open a **Pull Request**
 5. CI + CodeQL + Dependency Review run automatically
 6. Get code review and merge
+7. skip codde if file not change for python or java script
 
 ---
 
