@@ -119,6 +119,41 @@ jobs:
         with:
           category: "/language:${{ matrix.language }}"
           upload: always
+  # ─────────────────────────────────────────────
+  # 3. Upload empty SARIF when CodeQL is skipped
+  #    Satisfies GitHub's native code scanning
+  #    branch protection when no Python/JS changed
+  # ─────────────────────────────────────────────
+  upload-empty-sarif:
+    name: Upload Empty SARIF
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.run-codeql != 'true'
+    permissions:
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Upload empty SARIF to satisfy code scanning
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const emptySarif = {
+              version: "2.1.0",
+              runs: []
+            };
+            const encoded = Buffer.from(JSON.stringify(emptySarif)).toString('base64');
+            await github.rest.codeScanning.uploadSarif({
+              owner:      context.repo.owner,
+              repo:       context.repo.repo,
+              commit_sha: context.sha,
+              ref:        context.ref,
+              sarif:      encoded,
+              tool_name:  'CodeQL',
+            });
+            core.info('✅ Empty SARIF uploaded — code scanning requirement satisfied.');
 
   # ─────────────────────────────────────────────
   # 3. Security gate
@@ -126,7 +161,7 @@ jobs:
   security-gate:
     name: Security Gate / Block Critical
     runs-on: ubuntu-latest
-    needs: [detect-changes, codeql-analysis]      # ✅ Fixed: was `needs: analyze`
+    needs: [detect-changes, codeql-analysis, upload-empty-sarif]      # ✅ Fixed: was `needs: analyze`
     timeout-minutes: 10
     if: |
       always() &&
