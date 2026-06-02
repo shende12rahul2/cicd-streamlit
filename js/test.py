@@ -2,7 +2,7 @@ import hashlib
 import os
 import random
 import tempfile
-
+import test
 
 # MEDIUM: insecure randomness
 def generate_token():
