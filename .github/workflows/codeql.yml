@@ -53,10 +53,44 @@ jobs:
   # ─────────────────────────────────────────────
   # 1. CodeQL static analysis
   # ─────────────────────────────────────────────
-  analyze:
-    name: CodeQL Analyze (${{ matrix.language }})
+  detect-changes:
+    name: Detect File Changes
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    outputs:
+      run-codeql: ${{ steps.filter.outputs.run-codeql }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history needed for accurate diff
+
+      - name: Check for Python or JS changes
+        id: filter
+        run: |
+          # Get list of changed files
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          else
+            CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+          fi
+
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          # Check if any Python or JS/TS files changed
+          if echo "$CHANGED_FILES" | grep -qE '\.(py|js|jsx|ts|tsx)$'; then
+            echo "run-codeql=true" >> $GITHUB_OUTPUT
+            echo "✅ Python/JS files detected — CodeQL will run"
+          else
+            echo "run-codeql=false" >> $GITHUB_OUTPUT
+            echo "⏭️ No Python/JS files changed — skipping CodeQL"
+          fi
+
+  codeql-analysis:
+    name: CodeQL Analysis
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.run-codeql == 'true'
 
     strategy:
       fail-fast: false
